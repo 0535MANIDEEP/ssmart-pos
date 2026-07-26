@@ -1,0 +1,75 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: nodedr-pos-backend
+    restart: unless-stopped
+    environment:
+      # Absolute path — do not go back to a ".." relative path here. Prisma's
+      # old built-in SQLite engine resolved relative file: URLs relative to
+      # schema.prisma's directory, but the better-sqlite3 driver adapter
+      # (see backend/src/lib/prisma.js) resolves them relative to process
+      # cwd (/app, this container's WORKDIR). A relative "../data/pos.db"
+      # silently resolved to /data/pos.db — OUTSIDE the mounted volume below
+      # — so every container recreation wiped the database with no error.
+      DATABASE_URL: "file:/app/data/pos.db"
+      PORT: "4000"
+      FRONTEND_ORIGIN: "http://localhost:1994"
+      COOKIE_SECURE: "false"
+    # The backend is intentionally NOT published to the host. It's reachable
+    # only over the internal Docker network via the frontend's /api proxy,
+    # which keeps the API off the LAN and shrinks the attack surface. To hit
+    # it directly for debugging, temporarily add `ports: ["4000:4000"]`.
+    expose:
+      - "4000"
+    # Named, Docker-managed volume — persists the SQLite database and the
+    # auto-generated session secret independently of the container
+    # lifecycle. Survives `docker compose down`, image rebuilds, and
+    # `docker compose up --build`; only `docker compose down -v` (or
+    # `docker volume rm nodedr-pos_data`) removes it. See README > Backing
+    # up / resetting data.
+    volumes:
+      - data:/app/data
+      # Direct-USB thermal printing (see backend/src/lib/escposUsb.js) needs
+      # the backend to see the host's USB device nodes. Bind-mounting the
+      # whole /dev/bus/usb tree (not `devices:` with a literal path, which
+      # only handles device nodes that already exist at container-start —
+      # USB bus/device numbers are dynamic and can renumber on reconnect)
+      # keeps this working across printer unplug/replug without a restart.
+      - /dev/bus/usb:/dev/bus/usb
+    # Grants read/write/mknod WITHOUT full `privileged: true` on the two
+    # device majors the printer needs, so the backend still can't see or touch
+    # anything else on the host:
+    #   189 — usbfs (/dev/bus/usb/BBB/DDD), used by the libusb transport.
+    #   180 — usblp, the kernel printer driver behind /dev/usb/lp0. This is
+    #         the PRIMARY transport (see backend/src/lib/escposUsb.js): the
+    #         same node a working `echo > /dev/usb/lp0` writes to, and the one
+    #         generic vendor-class 80mm printers only expose through the
+    #         kernel. The 'm' (mknod) grant lets the backend create the lp
+    #         node inside the container on demand and write straight through
+    #         to the host kernel's already-bound printer — no host bind mount,
+    #         so nothing fails at `compose up` when no printer is attached.
+    device_cgroup_rules:
+      - 'c 189:* rmw'
+      - 'c 180:* rmw'
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Where the Next.js server proxies /api/* requests. Baked into the
+        # build (Next resolves rewrite destinations at build time). Points at
+        # the backend service over the internal Docker network; never exposed
+        # to the browser.
+        BACKEND_URL: "http://backend:4000"
+    container_name: nodedr-pos-frontend
+    restart: unless-stopped
+    ports:
+      - "1994:3000"
+    depends_on:
+      - backend
+
+volumes:
+  data:

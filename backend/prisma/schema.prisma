@@ -1,0 +1,220 @@
+datasource db {
+  provider = "sqlite"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  name      String
+  email     String   @unique
+  password  String
+  role      String   @default("admin") // "admin" | "cashier"
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
+
+model ShopSettings {
+  id             Int      @id @default(autoincrement())
+  shopName       String
+  legalName      String?
+  address1       String
+  address2       String?
+  city           String?
+  state          String?
+  phone          String?
+  email          String?
+  // Currency
+  currencyCode   String   @default("INR") // INR | USD | EUR | GBP
+  currencySymbol String   @default("Rs.")
+  // Tax / GST
+  gstEnabled     Boolean  @default(false)
+  gstNumber      String?
+  panNumber      String?
+  defaultTaxRate Float    @default(0)
+  // Loyalty
+  loyaltyEnabled Boolean  @default(false)
+  pointsPerUnit  Float    @default(0) // points earned per 1 currency unit spent
+  pointValue     Float    @default(0) // currency value of 1 point when redeemed
+  // Receipt customisation
+  receiptHeader  String?
+  receiptFooter  String   @default("Thank You! Visit Again.")
+  showGst        Boolean  @default(true)
+  autoPrintReceipt Boolean @default(false)
+  // Direct-USB (ESC/POS) printing — see backend/src/lib/escposReceipt.js.
+  // Paper width in mm; only 58 or 80 are meaningful (drives the fixed
+  // monospace column count for the raw text layout).
+  usbPrinterWidth Int @default(80)
+  // How a receipt prints when "auto-print after sale" is on:
+  //   "browser" — the OS/browser print dialog (window.print), the default
+  //               and what a Windows machine with a printer driver uses.
+  //   "usb"     — raw ESC/POS straight to the USB thermal printer, with NO
+  //               modal dialog. Required on a headless/kiosk Debian till
+  //               where the browser print dialog has no configured printer
+  //               and would otherwise hang the screen after every sale.
+  autoPrintMethod String @default("browser")
+  // Inventory
+  lowStockAlert  Int      @default(5)
+  allowNegativeStock Boolean @default(false)
+  // Address lookup (see PinCode below)
+  pincode        String?
+}
+
+model Product {
+  id            Int           @id @default(autoincrement())
+  barcode       String        @unique
+  name          String
+  category      String?
+  hsn           String?
+  unit          String? // UQC code, e.g. "PCS", "KGS" — see frontend/lib/masters.ts UQC_UNITS
+  purchasePrice Float
+  sellingPrice  Float
+  taxRate       Float         @default(0) // GST % for this product
+  discountType  String?       // "percent" | "amount" | null (no standing discount)
+  discountValue Float         @default(0) // interpreted per discountType; applied automatically at checkout
+  stock         Int           @default(0)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  invoiceItems  InvoiceItem[]
+  returnItems   ReturnItem[]
+}
+
+model Customer {
+  id            Int       @id @default(autoincrement())
+  name          String
+  phone         String    @unique
+  email         String?
+  loyaltyPoints Int       @default(0)
+  totalSpent    Float     @default(0)
+  totalDue      Float     @default(0) // outstanding credit ("udhaar") owed by this customer
+  creditBalance Float     @default(0) // store credit owed TO the customer (e.g. from a return kept as balance)
+  visits        Int       @default(0)
+  createdAt     DateTime  @default(now())
+  invoices      Invoice[]
+  duePayments   CustomerDuePayment[]
+  returns       Return[]
+}
+
+// A record of each payment a customer makes against their running due
+// balance — kept as its own audit trail rather than just decrementing
+// Customer.totalDue with no history.
+model CustomerDuePayment {
+  id         Int      @id @default(autoincrement())
+  customerId Int
+  amount     Float
+  note       String?
+  createdAt  DateTime @default(now())
+  customer   Customer @relation(fields: [customerId], references: [id])
+}
+
+model Invoice {
+  id             Int           @id @default(autoincrement())
+  invoiceNumber  String        @unique
+  customerId     Int?
+  customerName   String        @default("Walk-in Customer")
+  customerPhone  String?
+  subtotal       Float // sum of line bases, pre-discount, pre-tax
+  discountType   String? // "percent" | "amount"
+  discountValue  Float         @default(0)
+  discountAmount Float         @default(0) // manual discount in currency
+  taxAmount      Float         @default(0)
+  loyaltyDiscount Float        @default(0) // currency value of redeemed points
+  totalAmount    Float // final payable
+  paymentMethod  String        @default("CASH") // CASH | UPI | CARD
+  amountPaid     Float         @default(0)
+  changeDue      Float         @default(0)
+  dueAmount      Float         @default(0) // unpaid shortfall added to the customer's running due ("udhaar")
+  previousDuePaid Float        @default(0) // old due the customer cleared as part of this same bill
+  returnValue    Float         @default(0) // value of items returned on this bill, netted against the sale
+  creditApplied  Float         @default(0) // store credit the customer spent on this bill
+  refundValue    Float         @default(0) // paid back to the customer (returns beyond the purchase) as cash or credit
+  refundMode     String? // "CASH" | "CREDIT" — how refundValue was settled
+  pointsRedeemed Int           @default(0)
+  pointsEarned   Int           @default(0)
+  createdAt      DateTime      @default(now())
+  customer       Customer?     @relation(fields: [customerId], references: [id])
+  items          InvoiceItem[]
+  returns        Return[]
+}
+
+model InvoiceItem {
+  id        Int     @id @default(autoincrement())
+  invoiceId Int
+  productId Int
+  name      String
+  unit      String? // snapshot of the product's UQC at time of sale
+  quantity  Int
+  price     Float // unit selling price at time of sale
+  taxRate   Float   @default(0)
+  taxAmount Float   @default(0) // tax for this line (on discounted base)
+  total     Float // line total incl. tax, after prorated discount
+  invoice   Invoice @relation(fields: [invoiceId], references: [id])
+  product   Product @relation(fields: [productId], references: [id])
+  returnItems ReturnItem[]
+}
+
+// A return against a past invoice — one or more line items, each capped at
+// (quantity sold - quantity already returned) so the same unit can't be
+// returned twice. "Returned quantity so far" is always computed by summing
+// ReturnItem rows for an invoice item (see routes/returns.js) rather than
+// stored as a running counter, matching CustomerDuePayment's audit-trail
+// pattern elsewhere in this schema.
+model Return {
+  id           Int          @id @default(autoincrement())
+  invoiceId    Int
+  customerId   Int?
+  totalRefund  Float
+  refundMethod String // "CASH" | "UPI" | "CARD" | "DUE_ADJUST"
+  note         String?
+  createdAt    DateTime     @default(now())
+  invoice      Invoice      @relation(fields: [invoiceId], references: [id])
+  customer     Customer?    @relation(fields: [customerId], references: [id])
+  items        ReturnItem[]
+}
+
+model ReturnItem {
+  id            Int         @id @default(autoincrement())
+  returnId      Int
+  invoiceItemId Int
+  productId     Int
+  name          String
+  quantity      Int
+  refundAmount  Float
+  return        Return      @relation(fields: [returnId], references: [id])
+  invoiceItem   InvoiceItem @relation(fields: [invoiceItemId], references: [id])
+  product       Product     @relation(fields: [productId], references: [id])
+}
+
+// --- Bulk reference data, admin-imported from CSV (see routes/masters.js) ---
+// Large/volatile government datasets (full HSN/SAC catalogs, PIN codes,
+// IFSC) are deliberately NOT bundled with the app — see README > Reference
+// data & validation. These tables just give the admin somewhere to load
+// the official file into, if/when they want autocomplete and lookups.
+
+model TaxCode {
+  id          Int     @id @default(autoincrement())
+  type        String // "HSN" | "SAC"
+  code        String
+  description String
+  gstRate     Float?
+
+  @@unique([type, code])
+}
+
+model PinCode {
+  pincode  String  @id
+  area     String?
+  district String?
+  state    String?
+}
+
+model IfscCode {
+  ifsc     String  @id
+  bank     String?
+  branch   String?
+  address  String?
+  district String?
+  state    String?
+}
