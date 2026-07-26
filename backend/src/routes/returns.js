@@ -22,11 +22,9 @@ const returnSchema = z.object({
 });
 
 // POST /api/returns — return one or more lines from a past invoice. Restocks
-// the returned quantity, refunds either as cash/UPI/card (informational —
-// no ledger beyond this record) or by reducing the customer's outstanding
-// due. "Already returned" is computed by summing prior ReturnItem rows for
-// each invoice item rather than a running counter, so the same unit can
-// never be returned twice even across multiple partial returns.
+// the returned quantity, refunds either as cash/UPI/card or by reducing the
+// customer's outstanding due. Also updates the customer's totalSpent and
+// clawing back loyalty points earned on the returned items.
 router.post('/', async (req, res) => {
   const parsed = returnSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -39,6 +37,7 @@ router.post('/', async (req, res) => {
       const invoice = await tx.invoice.findUnique({ where: { id: body.invoiceId }, include: { items: true } });
       if (!invoice) throw Object.assign(new Error('Invoice not found'), { status: 404 });
 
+      const settings = await tx.shopSettings.findFirst();
       const itemMap = new Map(invoice.items.map((it) => [it.id, it]));
       const returnLines = [];
       for (const line of body.items) {
@@ -57,9 +56,6 @@ router.post('/', async (req, res) => {
             { status: 409 }
           );
         }
-        // Refund proportionally to what was actually charged for this line
-        // (invoiceItem.total already reflects any per-line discount
-        // proration), not the pre-discount unit price.
         const refundAmount = round2((invoiceItem.total / invoiceItem.quantity) * line.quantity);
         returnLines.push({ invoiceItem, quantity: line.quantity, refundAmount });
       }
@@ -92,6 +88,7 @@ router.post('/', async (req, res) => {
         include: { items: true },
       });
 
+      // Restock returned products
       for (const l of returnLines) {
         await tx.product.update({
           where: { id: l.invoiceItem.productId },
@@ -99,12 +96,34 @@ router.post('/', async (req, res) => {
         });
       }
 
-      if (body.refundMethod === 'DUE_ADJUST' && invoice.customerId) {
+      // Update customer balances: totalSpent, loyalty points, and due adjustment
+      if (invoice.customerId) {
         const customer = await tx.customer.findUnique({ where: { id: invoice.customerId } });
-        const adjust = Math.min(totalRefund, customer.totalDue);
-        if (adjust > 0) {
-          await tx.customer.update({ where: { id: invoice.customerId }, data: { totalDue: { decrement: adjust } } });
+
+        // Claw back loyalty points: recalculate points earned on returned items
+        // Points formula mirrors pricing.js: pointsPerUnit per rupee of selling price
+        let pointsToClawBack = 0;
+        if (settings?.loyaltyEnabled && settings?.pointsPerUnit > 0) {
+          pointsToClawBack = returnLines.reduce((sum, l) => {
+            const unitPrice = l.invoiceItem.total / l.invoiceItem.quantity;
+            return sum + Math.floor(unitPrice * settings.pointsPerUnit) * l.quantity;
+          }, 0);
         }
+
+        const customerUpdate = {
+          totalSpent: round2(Math.max(0, customer.totalSpent - totalRefund)),
+          loyaltyPoints: Math.max(0, customer.loyaltyPoints - pointsToClawBack),
+        };
+
+        // Due adjustment
+        if (body.refundMethod === 'DUE_ADJUST') {
+          const adjust = Math.min(totalRefund, customer.totalDue);
+          if (adjust > 0) {
+            customerUpdate.totalDue = round2(customer.totalDue - adjust);
+          }
+        }
+
+        await tx.customer.update({ where: { id: invoice.customerId }, data: customerUpdate });
       }
 
       return created;

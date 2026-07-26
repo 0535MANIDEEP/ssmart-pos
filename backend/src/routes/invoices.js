@@ -57,8 +57,9 @@ const checkoutSchema = z
   });
 
 async function nextInvoiceNumber(tx) {
-  const count = await tx.invoice.count();
   const year = new Date().getFullYear();
+  const startOfYear = new Date(year, 0, 1);
+  const count = await tx.invoice.count({ where: { createdAt: { gte: startOfYear } } });
   return `INV-${year}-${String(count + 1).padStart(5, '0')}`;
 }
 
@@ -332,31 +333,39 @@ router.get('/', async (req, res) => {
   res.json(invoices);
 });
 
-// GET /api/invoices/summary — dashboard totals for today
+// GET /api/invoices/summary — dashboard totals for today. Returns
+// (checkout-bundled and standalone) are subtracted to show net revenue.
 router.get('/summary', async (req, res) => {
   const start = new Date();
   start.setHours(0, 0, 0, 0);
-  const [todays, all] = await Promise.all([
+
+  const [todaysInvoices, todaysReturns, allInvoices, allReturns] = await Promise.all([
     prisma.invoice.findMany({ where: { createdAt: { gte: start } } }),
+    prisma.return.findMany({ where: { createdAt: { gte: start } }, select: { totalRefund: true } }),
     prisma.invoice.aggregate({ _sum: { totalAmount: true }, _count: true }),
+    prisma.return.aggregate({ _sum: { totalRefund: true } }),
   ]);
-  const todaysRevenue = round2(todays.reduce((s, i) => s + i.totalAmount, 0));
+
+  const todaysInvoiceTotal = round2(todaysInvoices.reduce((s, i) => s + i.totalAmount, 0));
+  const todaysReturnTotal = round2(todaysReturns.reduce((s, r) => s + r.totalRefund, 0));
+
   res.json({
-    todaysCount: todays.length,
-    todaysRevenue,
-    totalSales: all._count,
-    totalRevenue: round2(all._sum.totalAmount || 0),
+    todaysCount: todaysInvoices.length,
+    todaysRevenue: round2(todaysInvoiceTotal - todaysReturnTotal),
+    totalSales: allInvoices._count,
+    totalRevenue: round2((allInvoices._sum.totalAmount || 0) - (allReturns._sum.totalRefund || 0)),
   });
 });
 
 // GET /api/invoices/analytics — feeds the dashboard charts: revenue trend
-// over the last 14 days, top-selling products, and payment method mix.
+// over the last 14 days, top-selling products (net of returns), and
+// payment method mix. All figures subtract returns for accuracy.
 router.get('/analytics', async (req, res) => {
   const since = new Date();
   since.setDate(since.getDate() - 13);
   since.setHours(0, 0, 0, 0);
 
-  const [recent, topItems, byMethod] = await Promise.all([
+  const [recent, topItems, byMethod, recentReturns, returnedItems, returnByMethod] = await Promise.all([
     prisma.invoice.findMany({
       where: { createdAt: { gte: since } },
       select: { createdAt: true, totalAmount: true, paymentMethod: true },
@@ -372,8 +381,23 @@ router.get('/analytics', async (req, res) => {
       _sum: { totalAmount: true },
       _count: true,
     }),
+    prisma.return.findMany({
+      where: { createdAt: { gte: since } },
+      select: { createdAt: true, totalRefund: true },
+    }),
+    prisma.returnItem.groupBy({
+      by: ['productId', 'name'],
+      _sum: { quantity: true, refundAmount: true },
+      where: { return: { createdAt: { gte: since } } },
+    }),
+    prisma.return.groupBy({
+      by: ['refundMethod'],
+      _sum: { totalRefund: true },
+      where: { createdAt: { gte: since } },
+    }),
   ]);
 
+  // Revenue trend — subtract returns per day
   const trendMap = new Map();
   for (let i = 0; i < 14; i++) {
     const d = new Date(since);
@@ -388,19 +412,47 @@ router.get('/analytics', async (req, res) => {
       bucket.count += 1;
     }
   }
+  for (const ret of recentReturns) {
+    const key = new Date(ret.createdAt).toISOString().slice(0, 10);
+    const bucket = trendMap.get(key);
+    if (bucket) {
+      bucket.revenue = round2(bucket.revenue - ret.totalRefund);
+    }
+  }
+
+  // Top products — net of returns
+  const returnMap = new Map(returnedItems.map((r) => [r.productId, r]));
+  const topProducts = topItems
+    .map((t) => {
+      const ret = returnMap.get(t.productId);
+      const returnedQty = ret?._sum.quantity || 0;
+      const returnedAmt = ret?._sum.refundAmount || 0;
+      return {
+        name: t.name,
+        quantity: (t._sum.quantity || 0) - returnedQty,
+        revenue: round2((t._sum.total || 0) - returnedAmt),
+      };
+    })
+    .filter((t) => t.quantity > 0);
+
+  // Payment methods — net of refunds by method
+  const returnMethodMap = new Map(returnByMethod.map((r) => [r.refundMethod, r]));
+  const paymentMethods = byMethod
+    .map((m) => {
+      const ret = returnMethodMap.get(m.paymentMethod);
+      const returned = ret?._sum.totalRefund || 0;
+      return {
+        method: m.paymentMethod,
+        count: m._count,
+        revenue: round2((m._sum.totalAmount || 0) - returned),
+      };
+    })
+    .filter((m) => m.revenue > 0);
 
   res.json({
     trend: Array.from(trendMap.values()),
-    topProducts: topItems.map((t) => ({
-      name: t.name,
-      quantity: t._sum.quantity || 0,
-      revenue: round2(t._sum.total || 0),
-    })),
-    paymentMethods: byMethod.map((m) => ({
-      method: m.paymentMethod,
-      count: m._count,
-      revenue: round2(m._sum.totalAmount || 0),
-    })),
+    topProducts,
+    paymentMethods,
   });
 });
 
