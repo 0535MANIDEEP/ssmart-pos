@@ -6,22 +6,43 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// Indian number grouping: 1,00,000.00
+function indianGrouping(n) {
+  const [intPart, decPart] = Number(n).toFixed(2).split('.');
+  const last3 = intPart.slice(-3);
+  const rest = intPart.slice(0, -3);
+  if (!rest) return `${last3}.${decPart}`;
+  return `${rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',')},${last3}.${decPart}`;
+}
+
+function formatInrDate(d) {
+  const date = d instanceof Date ? d : new Date(d);
+  const dd = String(date.getDate()).padStart(2, '0');
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const yyyy = date.getFullYear();
+  const hh = String(date.getHours()).padStart(2, '0');
+  const min = String(date.getMinutes()).padStart(2, '0');
+  return `${dd}/${mm}/${yyyy} ${hh}:${min}`;
+}
+
 // Builds a standalone, self-printing HTML receipt. Loaded into a hidden
 // same-page iframe (see frontend/lib/print.ts) rather than a new tab, it
 // calls window.print() on load — the browser's own print dialog lets the
 // user pick any printer (thermal, laser, PDF virtual printer, whatever the
 // OS/CUPS has configured) instead of us talking to a USB device directly.
 function buildReceiptHtml({ shop, invoice }) {
-  const sym = shop.currencySymbol || 'Rs.';
-  const money = (n) => `${sym} ${Number(n).toFixed(2)}`;
+  const sym = shop.currencySymbol || '\u20B9';
+  const money = (n) => `${sym} ${indianGrouping(n)}`;
   const date = new Date(invoice.createdAt || Date.now());
-  const dateStr = date.toLocaleString();
+  const dateStr = formatInrDate(date);
 
   const itemRows = invoice.items
     .map(
       (it) => `
         <tr>
           <td>${esc(it.name)}${
+            it.hsn ? ` <span class="sub">(HSN: ${esc(it.hsn)})</span>` : ''
+          }${
             shop.gstEnabled && shop.showGst && it.taxRate > 0
               ? `<div class="sub">GST @ ${it.taxRate}%</div>`
               : ''

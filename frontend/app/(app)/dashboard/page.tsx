@@ -9,7 +9,7 @@ import { useLowStock, useProducts } from "@/hooks/useProducts";
 import { useInvoices, useSalesAnalytics, useSalesSummary } from "@/hooks/useInvoices";
 import { useTopLoyaltyCustomers } from "@/hooks/useCustomers";
 import { useShopSettings } from "@/hooks/useShopSettings";
-import { formatMoney } from "@/lib/format";
+import { formatMoney, formatDateTime } from "@/lib/format";
 
 export default function DashboardPage() {
   const { data: shop } = useShopSettings();
@@ -20,7 +20,7 @@ export default function DashboardPage() {
   const { data: analytics } = useSalesAnalytics();
   const { data: topCustomers } = useTopLoyaltyCustomers(10);
 
-  const sym = shop?.currencySymbol || "Rs.";
+  const sym = shop?.currencySymbol || "\u20B9";
   const money = (n: number) => formatMoney(n, sym);
   const bestSeller = analytics?.topProducts[0];
 
@@ -156,7 +156,7 @@ export default function DashboardPage() {
                   <tr key={inv.id}>
                     <td className="py-2.5 pr-4 font-medium text-foreground">{inv.invoiceNumber}</td>
                     <td className="py-2.5 pr-4 text-foreground/70">{inv.customerName}</td>
-                    <td className="py-2.5 pr-4 text-foreground/70">{new Date(inv.createdAt).toLocaleString()}</td>
+                    <td className="py-2.5 pr-4 text-foreground/70">{formatDateTime(inv.createdAt)}</td>
                     <td className="py-2.5 text-right font-medium text-foreground">{money(inv.totalAmount)}</td>
                   </tr>
                 ))}

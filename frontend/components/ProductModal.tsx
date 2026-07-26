@@ -107,7 +107,7 @@ export function ProductModal({ mode, product, initialBarcode, onClose }: Product
   const sellingPrice = useWatch({ control, name: "sellingPrice" });
   const discountType = useWatch({ control, name: "discountType" });
   const discountValue = useWatch({ control, name: "discountValue" });
-  const sym = shop?.currencySymbol ?? "Rs.";
+  const sym = shop?.currencySymbol ?? "\u20B9";
   const discountedPrice = (() => {
     if (!discountType || !discountValue) return sellingPrice;
     if (discountType === "percent") {

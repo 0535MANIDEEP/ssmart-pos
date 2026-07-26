@@ -53,7 +53,7 @@ export default function PosPage() {
   }, [manualQuery]);
   const { data: manualResults } = useProducts(committedQuery);
 
-  const sym = shop?.currencySymbol || "Rs.";
+  const sym = shop?.currencySymbol || "\u20B9";
   const money = (n: number) => formatMoney(n, sym);
 
   const quote = useMemo(

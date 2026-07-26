@@ -101,13 +101,19 @@ function wrap(text, width) {
 }
 
 function buildReceiptEscPos({ shop, invoice, width = 42 }) {
-  // Only fall back to the currency CODE (e.g. "EUR") instead of the symbol
-  // when the symbol itself isn't plain ASCII (€, £, ﷼, ₱, ...) — a generic
-  // printer's default codepage can't render those reliably, but a 3-letter
-  // code always prints cleanly and stays unambiguous.
-  const sym = shop.currencySymbol && ASCII_ONLY.test(shop.currencySymbol) ? shop.currencySymbol : shop.currencyCode || '';
+  // ₹ is Unicode U+20B9 — outside printable ASCII, so ESC/POS can't render
+  // it. Fall back to "INR" which is always safe on generic printers.
+  const sym = shop.currencySymbol && ASCII_ONLY.test(shop.currencySymbol) ? shop.currencySymbol : 'INR';
   const money = (n) => `${sym} ${Number(n).toFixed(2)}`;
+
+  // Indian date format DD/MM/YYYY HH:MM
   const date = new Date(invoice.createdAt || Date.now());
+  const dd = String(date.getDate()).padStart(2, '0');
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const yyyy = date.getFullYear();
+  const hh = String(date.getHours()).padStart(2, '0');
+  const min = String(date.getMinutes()).padStart(2, '0');
+  const dateStr = `${dd}/${mm}/${yyyy} ${hh}:${min}`;
 
   // Each entry is `{ text, bold }` rather than a plain string so the shop
   // name and grand total can be emphasized (matching the HTML receipt's
@@ -125,7 +131,7 @@ function buildReceiptEscPos({ shop, invoice, width = 42 }) {
   if (shop.phone) push(center(toPrinterText(`Ph: ${shop.phone}`), width));
   if (shop.gstEnabled && shop.gstNumber) push(center(toPrinterText(`GSTIN: ${shop.gstNumber}`), width));
   push(rule(width));
-  push(toPrinterText(date.toLocaleString()));
+  push(toPrinterText(dateStr));
   push(toPrinterText(`Bill: #${invoice.invoiceNumber}`));
   const cust = `Cust: ${invoice.customerName || 'Walk-in Customer'}${invoice.customerPhone ? ` - ${invoice.customerPhone}` : ''}`;
   for (const l of wrap(cust, width)) push(l);
@@ -139,7 +145,8 @@ function buildReceiptEscPos({ shop, invoice, width = 42 }) {
   // receipts' table, just laid out for a narrow fixed-width strip instead
   // of a wide proportional-font table.
   for (const item of invoice.items) {
-    for (const l of wrap(item.name, width)) push(l);
+    const nameWithHsn = item.hsn ? `${item.name} (HSN:${item.hsn})` : item.name;
+    for (const l of wrap(nameWithHsn, width)) push(l);
     const qty = `${item.quantity}${item.unit ? ` ${item.unit}` : ''}`;
     push(row(`  ${qty} x ${money(item.price)}`, money(item.price * item.quantity), width));
     if (shop.gstEnabled && shop.showGst && item.taxRate > 0) {

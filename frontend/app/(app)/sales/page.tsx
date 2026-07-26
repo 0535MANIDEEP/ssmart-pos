@@ -9,7 +9,7 @@ import { useInvoices, useInvoice } from "@/hooks/useInvoices";
 import { useCreateReturn, useReturnsForInvoice } from "@/hooks/useReturns";
 import { useShopSettings } from "@/hooks/useShopSettings";
 import { useToast } from "@/components/Toast";
-import { formatMoney } from "@/lib/format";
+import { formatMoney, formatDateTime, formatDate } from "@/lib/format";
 import { ApiError } from "@/lib/api";
 import type { RefundMethod } from "@/lib/types";
 
@@ -18,7 +18,7 @@ export default function SalesPage() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const { data: invoices, isLoading } = useInvoices(search);
   const { data: shop } = useShopSettings();
-  const sym = shop?.currencySymbol || "Rs.";
+  const sym = shop?.currencySymbol || "\u20B9";
 
   return (
     <div className="flex flex-col gap-6">
@@ -64,7 +64,7 @@ export default function SalesPage() {
                     className="cursor-pointer hover:bg-surface-muted"
                   >
                     <td className="py-2.5 pr-4 font-medium text-brand">{inv.invoiceNumber}</td>
-                    <td className="py-2.5 pr-4 text-foreground/70">{new Date(inv.createdAt).toLocaleString()}</td>
+                    <td className="py-2.5 pr-4 text-foreground/70">{formatDateTime(inv.createdAt)}</td>
                     <td className="py-2.5 pr-4 text-foreground/70">{inv.customerName}</td>
                     <td className="py-2.5 pr-4 text-foreground/70">{inv.paymentMethod}</td>
                     <td className="py-2.5 text-right font-medium text-foreground">{formatMoney(inv.totalAmount, sym)}</td>
@@ -152,7 +152,7 @@ function InvoiceDrawer({ id, sym, onClose }: { id: number; sym: string; onClose:
         ) : (
           <div className="flex flex-col gap-4 text-sm">
             <div className="text-foreground/60">
-              <p>{new Date(invoice.createdAt).toLocaleString()}</p>
+              <p>{formatDateTime(invoice.createdAt)}</p>
               <p>{invoice.customerName}{invoice.customerPhone ? ` · ${invoice.customerPhone}` : ""}</p>
             </div>
 
@@ -276,7 +276,7 @@ function InvoiceDrawer({ id, sym, onClose }: { id: number; sym: string; onClose:
                   {returns.map((r) => (
                     <div key={r.id} className="flex items-center justify-between text-xs text-foreground/60">
                       <span>
-                        {new Date(r.createdAt).toLocaleDateString()} · {r.items.reduce((s, i) => s + i.quantity, 0)} item(s) ·{" "}
+                        {formatDate(r.createdAt)} · {r.items.reduce((s, i) => s + i.quantity, 0)} item(s) ·{" "}
                         {r.refundMethod === "DUE_ADJUST" ? "due adjusted" : r.refundMethod.toLowerCase()}
                       </span>
                       <span>{money(r.totalRefund)}</span>

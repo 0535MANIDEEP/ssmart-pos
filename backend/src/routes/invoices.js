@@ -58,9 +58,17 @@ const checkoutSchema = z
 
 async function nextInvoiceNumber(tx) {
   const year = new Date().getFullYear();
-  const startOfYear = new Date(year, 0, 1);
-  const count = await tx.invoice.count({ where: { createdAt: { gte: startOfYear } } });
-  return `INV-${year}-${String(count + 1).padStart(5, '0')}`;
+  const prefix = `INV-${year}-`;
+  // Find the highest existing invoice number for this year and increment.
+  // Inside $transaction, SQLite serializes writes so two concurrent requests
+  // cannot read the same last number — no duplicates.
+  const last = await tx.invoice.findFirst({
+    where: { invoiceNumber: { startsWith: prefix } },
+    orderBy: { invoiceNumber: 'desc' },
+    select: { invoiceNumber: true },
+  });
+  const seq = last ? parseInt(last.invoiceNumber.slice(prefix.length), 10) + 1 : 1;
+  return `${prefix}${String(seq).padStart(5, '0')}`;
 }
 
 // POST /api/invoices — finalize a sale. Everything money-related (prices,

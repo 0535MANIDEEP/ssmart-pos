@@ -28,7 +28,7 @@ export default function InventoryPage() {
   const deleteProduct = useDeleteProduct();
   const { show } = useToast();
 
-  const sym = shop?.currencySymbol || "Rs.";
+  const sym = shop?.currencySymbol || "\u20B9";
   const money = (n: number) => formatMoney(n, sym);
   const lowStockThreshold = shop?.lowStockAlert ?? 5;
 

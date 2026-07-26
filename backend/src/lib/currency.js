@@ -3,7 +3,7 @@
 // This is a curated set of major/regionally-relevant currencies, not the
 // full ISO 4217 list.
 const CURRENCIES = {
-  INR: { symbol: 'Rs.', label: 'Indian Rupee' },
+  INR: { symbol: '\u20B9', label: 'Indian Rupee' },
   USD: { symbol: '$', label: 'US Dollar' },
   EUR: { symbol: '€', label: 'Euro' },
   GBP: { symbol: '£', label: 'British Pound' },

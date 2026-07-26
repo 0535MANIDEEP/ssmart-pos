@@ -56,5 +56,5 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`nodedr-pos backend listening on port ${PORT}`);
+  console.log(`SS Mart POS backend listening on port ${PORT}`);
 });

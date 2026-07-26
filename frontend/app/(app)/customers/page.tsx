@@ -32,7 +32,7 @@ export default function CustomersPage() {
   const createCustomer = useCreateCustomer();
   const settleDue = useSettleDue();
   const { show } = useToast();
-  const sym = shop?.currencySymbol || "Rs.";
+  const sym = shop?.currencySymbol || "\u20B9";
 
   async function clearDue(c: Customer) {
     if (!window.confirm(`Clear ${formatMoney(c.totalDue, sym)} due for ${c.name}? This marks it fully paid.`)) return;
