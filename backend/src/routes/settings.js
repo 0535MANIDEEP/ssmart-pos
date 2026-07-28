@@ -39,6 +39,9 @@ const fields = {
   autoPrintMethod: z.enum(['browser', 'usb']),
   lowStockAlert: z.number().int().min(0).max(100000),
   allowNegativeStock: z.boolean(),
+  showHsnOnPdf: z.boolean(),
+  backupSchedule: z.string().optional().or(z.literal('')),
+  backupRetention: z.number().int().min(0).max(365),
 };
 
 // POST (onboarding, create-once): every field required or defaulted.

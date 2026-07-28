@@ -87,10 +87,10 @@ export default function OnboardingPage() {
 
   return (
     <div className="flex min-h-screen flex-1 flex-col items-center justify-center gap-6 bg-background px-4 py-10">
-      <Card className="w-full max-w-lg p-8">
+      <Card className="w-full max-w-lg p-8 shadow-lg">
         <div className="mb-8 flex flex-col items-center gap-3 text-center">
-          <Image src="/logo.png" alt="nodedr-pos" width={64} height={64} className="h-16 w-16 rounded-full" priority />
-          <h1 className="text-xl font-semibold text-foreground">Welcome to nodedr-pos</h1>
+          <Image src="/logo.png" alt="SS Mart POS" width={64} height={64} className="h-16 w-16 rounded-full" priority />
+          <h1 className="text-xl font-semibold text-foreground">Welcome to SS Mart</h1>
           <p className="text-sm text-foreground/60">Let&apos;s set up your shop.</p>
         </div>
 

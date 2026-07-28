@@ -2,7 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import type { AuthUser, Role } from "@/lib/types";
+import type { AuthUser, Role, Permission } from "@/lib/types";
 
 export function useMe() {
   return useQuery({
@@ -42,3 +42,6 @@ export function useUpdateUser() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["users"] }),
   });
 }
+
+// Re-export permissions utilities for convenience
+export { usePermissions, useHasPermission, useHasAnyPermission, useHasAllPermissions, useUserRole } from "./usePermissions";

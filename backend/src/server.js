@@ -3,6 +3,9 @@ const cors = require('cors');
 const helmet = require('helmet');
 const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
+const cron = require('node-cron');
+const fs = require('fs');
+const path = require('path');
 
 const authRoutes = require('./routes/auth');
 const settingsRoutes = require('./routes/settings');
@@ -12,6 +15,10 @@ const invoiceRoutes = require('./routes/invoices');
 const returnRoutes = require('./routes/returns');
 const printRoutes = require('./routes/print');
 const mastersRoutes = require('./routes/masters');
+const billsRoutes = require('./routes/bills');
+const backupRoutes = require('./routes/backup');
+const accountingRoutes = require('./routes/accounting');
+const migrateRoutes = require('./routes/migrate');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -46,6 +53,10 @@ app.use('/api/invoices', invoiceRoutes);
 app.use('/api/returns', returnRoutes);
 app.use('/api/print', printRoutes);
 app.use('/api/masters', mastersRoutes);
+app.use('/api/bills', billsRoutes);
+app.use('/api/backup', backupRoutes);
+app.use('/api/accounting', accountingRoutes);
+app.use('/api/migrate', migrateRoutes);
 
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 
@@ -57,4 +68,37 @@ app.use((err, req, res, next) => {
 
 app.listen(PORT, () => {
   console.log(`SS Mart POS backend listening on port ${PORT}`);
+
+  const { performBackup } = require('./lib/backup');
+  const { rawDb } = require('./lib/prisma');
+
+  const schedule = process.env.BACKUP_SCHEDULE || '0 0 2 * * *';
+  cron.schedule(schedule, async () => {
+    try {
+      const dest = await performBackup(rawDb);
+      console.log(`[backup] Daily backup saved to ${dest}`);
+    } catch (err) {
+      console.error('[backup] Daily backup failed:', err.message);
+    }
+  }, {
+    name: 'daily-backup',
+    timezone: 'Asia/Kolkata',
+    noOverlap: true,
+    missedExecutionTolerance: 2 * 60 * 60 * 1000,
+  });
+
+  const ist = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+  const today = new Date(ist).toLocaleDateString('en-IN');
+  const lastBackupFile = path.join(__dirname, '..', '.last-backup');
+  let lastBackupDate = '';
+  try { lastBackupDate = fs.readFileSync(lastBackupFile, 'utf8').trim(); } catch {}
+  if (lastBackupDate !== today) {
+    console.log('[backup] Running missed daily backup on startup...');
+    performBackup(rawDb).then((dest) => {
+      console.log(`[backup] Startup backup saved to ${dest}`);
+      fs.writeFileSync(lastBackupFile, today);
+    }).catch((err) => {
+      console.error('[backup] Startup backup failed:', err.message);
+    });
+  }
 });

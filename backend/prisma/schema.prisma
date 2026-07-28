@@ -7,13 +7,15 @@ generator client {
 }
 
 model User {
-  id        Int      @id @default(autoincrement())
-  name      String
-  email     String   @unique
-  password  String
-  role      String   @default("admin") // "admin" | "cashier"
-  active    Boolean  @default(true)
-  createdAt DateTime @default(now())
+  id          Int      @id @default(autoincrement())
+  name        String
+  email       String   @unique
+  password    String
+  role        String   @default("admin") // "admin" | "manager" | "accountant" | "cashier"
+  permissions String   @default("[]") // JSON array of permission strings
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  draftBills  DraftBill[]
 }
 
 model ShopSettings {
@@ -60,6 +62,12 @@ model ShopSettings {
   allowNegativeStock Boolean @default(false)
   // Address lookup (see PinCode below)
   pincode        String?
+  // Backup & daily auto-backup schedule (cron syntax, default "0 2 * * *")
+  backupSchedule String  @default("0 2 * * *")
+  // Retention (days) for local backup files, default 30
+  backupRetention Int    @default(30)
+  // Whether HSN code appears on PDF receipts (default false, thermal always omits)
+  showHsnOnPdf    Boolean @default(false)
 }
 
 model Product {
@@ -136,7 +144,18 @@ model Invoice {
   createdAt      DateTime      @default(now())
   customer       Customer?     @relation(fields: [customerId], references: [id])
   items          InvoiceItem[]
+  payments       InvoicePayment[]
   returns        Return[]
+}
+
+// Individual payment line on an invoice — supports split payments
+// (e.g. ₹200 cash + ₹50 UPI in a single transaction)
+model InvoicePayment {
+  id        Int     @id @default(autoincrement())
+  invoiceId Int
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  method    String  // "CASH" | "UPI" | "CARD"
+  amount    Float
 }
 
 model InvoiceItem {
@@ -217,4 +236,164 @@ model IfscCode {
   address  String?
   district String?
   state    String?
+}
+
+model DraftBill {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id])
+  label     String?
+  state     String
+  isHeld    Boolean  @default(false)
+  version   Int      @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@unique([userId, label])
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ACCOUNTING MODULE — Double-entry bookkeeping (MARG ERP replacement)
+// ═══════════════════════════════════════════════════════════════════════
+
+model AccountGroup {
+  id         Int      @id @default(autoincrement())
+  code       String   @unique // e.g. "1.1.3"
+  name       String
+  parentId   Int?
+  parent     AccountGroup?  @relation("GroupTree", fields: [parentId], references: [id])
+  children   AccountGroup[] @relation("GroupTree")
+  nature     String         // "debit" | "credit"
+  reportType String         // "balance_sheet" | "profit_loss"
+  // Classification flags (replaces hardcoded code prefix checks)
+  bsCategory String?        // "asset" | "liability" | "capital" — balance sheet classification
+  cfCategory String?        // "operating" | "investing" | "financing" — cash flow classification
+  isSystem   Boolean  @default(false) // built-in groups can't be deleted
+  createdAt  DateTime @default(now())
+  ledgers    Ledger[]
+}
+
+model Ledger {
+  id            Int      @id @default(autoincrement())
+  name          String
+  groupId       Int
+  group         AccountGroup @relation(fields: [groupId], references: [id])
+  openingDebit  Float    @default(0)
+  openingCredit Float    @default(0)
+  isSystem      Boolean  @default(false)
+  linkedEntityType String? // "customer" | "supplier" | null
+  linkedEntityId   Int?
+  // Purpose tag: used by auto-journal to find the right ledger dynamically
+  // e.g. "cash", "bank", "sales", "purchases", "gst_cgst", "gst_sgst",
+  // "gst_igst", "discount_allowed", "capital", "receivable", "payable"
+  purpose       String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  journalLines  JournalLine[]
+  balances      LedgerBalance[]
+  expenses      Expense[]
+  @@unique([groupId, name])
+}
+
+model LedgerBalance {
+  id             Int      @id @default(autoincrement())
+  ledgerId       Int
+  ledger         Ledger   @relation(fields: [ledgerId], references: [id])
+  yearStart      DateTime // financial year start (e.g. 2026-04-01)
+  openingDebit   Float    @default(0)
+  openingCredit  Float    @default(0)
+  debitTotal     Float    @default(0)
+  creditTotal    Float    @default(0)
+  closingBalance Float    @default(0)
+  @@unique([ledgerId, yearStart])
+}
+
+model FinancialYear {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique // "2026-27"
+  startDate DateTime @unique
+  endDate   DateTime @unique
+  isClosed  Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+model Journal {
+  id            Int      @id @default(autoincrement())
+  voucherNumber String   @unique
+  date          DateTime
+  type          String   // "sales" | "purchase" | "payment" | "receipt" | "journal" | "contra" | "credit_note" | "debit_note"
+  referenceType String?  // "invoice" | "return" | "payment" | null
+  referenceId   Int?
+  narration     String?
+  totalDebit    Float    @default(0)
+  totalCredit   Float    @default(0)
+  isApproved    Boolean  @default(true)
+  createdBy     Int
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  lines         JournalLine[]
+  reconciliations BankReconciliation[]
+  @@index([date])
+  @@index([type])
+}
+
+model JournalLine {
+  id        Int     @id @default(autoincrement())
+  journalId Int
+  journal   Journal @relation(fields: [journalId], references: [id], onDelete: Cascade)
+  ledgerId  Int
+  ledger    Ledger  @relation(fields: [ledgerId], references: [id])
+  debit     Float   @default(0)
+  credit    Float   @default(0)
+  taxType   String? // "CGST" | "SGST" | "IGST" | null
+  taxAmount Float   @default(0)
+}
+
+model Expense {
+  id           Int      @id @default(autoincrement())
+  date         DateTime
+  ledgerId     Int
+  ledger       Ledger   @relation(fields: [ledgerId], references: [id])
+  amount       Float
+  paymentMode  String   // "cash" | "bank" | "upi"
+  bankLedgerId Int?
+  reference    String?
+  narration    String?
+  partyName    String?
+  createdBy    Int
+  createdAt    DateTime @default(now())
+}
+
+model BankReconciliation {
+  id            Int      @id @default(autoincrement())
+  journalId     Int
+  journal       Journal  @relation(fields: [journalId], references: [id])
+  statementDate DateTime
+  statementRef  String?
+  reconciled    Boolean  @default(false)
+  reconciledAt  DateTime?
+  amount        Float    @default(0)
+  createdAt     DateTime @default(now())
+}
+
+model CostCenter {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  code      String?  @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
+
+model MigrationLog {
+  id              Int      @id @default(autoincrement())
+  source          String   // "marg" | "tally" | "manual"
+  dataType        String   // "ledgers" | "products" | "customers" | "opening_balances"
+  filename        String?
+  recordsImported Int      @default(0)
+  recordsSkipped  Int      @default(0)
+  errors          String?
+  status          String   // "success" | "partial" | "failed"
+  createdBy       Int
+  createdAt       DateTime @default(now())
 }

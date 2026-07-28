@@ -3,6 +3,7 @@ const { z } = require('zod');
 const prisma = require('../lib/prisma');
 const { requireAuth } = require('../middleware/auth');
 const { computeSale, round2 } = require('../lib/pricing');
+const { journalFromInvoice } = require('../hooks/auto-journal');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -22,6 +23,17 @@ const checkoutSchema = z
     discountType: z.enum(['percent', 'amount']).nullish(),
     discountValue: z.number().min(0).default(0),
     pointsRedeemed: z.number().int().min(0).default(0),
+    // Split payments: array of { method, amount } — replaces single paymentMethod
+    // Falls back to single paymentMethod if payments array not provided (backward compat)
+    payments: z
+      .array(
+        z.object({
+          method: z.enum(['CASH', 'UPI', 'CARD']),
+          amount: z.number().min(0),
+        })
+      )
+      .optional(),
+    // Legacy single payment fields (used when payments array is not provided)
     paymentMethod: z.enum(['CASH', 'UPI', 'CARD']).default('CASH'),
     amountPaid: z.number().min(0).default(0),
     // Old outstanding due the customer chooses to clear as part of this bill.
@@ -83,7 +95,7 @@ router.post('/', async (req, res) => {
   const body = parsed.data;
 
   try {
-    const invoice = await prisma.$transaction(async (tx) => {
+    const invoiceStub = await prisma.$transaction(async (tx) => {
       const settings = await tx.shopSettings.findFirst();
       if (!settings) throw Object.assign(new Error('Shop settings not configured'), { status: 400 });
 
@@ -129,12 +141,6 @@ router.post('/', async (req, res) => {
 
       const saleTotal = computed.totalAmount;
 
-      // --- Returns processed as part of this bill --------------------------
-      // Each returned line is validated against its ORIGINAL invoice: the item
-      // must belong to that invoice and the quantity can't exceed what's still
-      // returnable (sold minus already returned). The refund defaults to what
-      // was originally charged for that quantity and can only be lowered, never
-      // raised above it — you can't refund more than the customer paid.
       let returnValue = 0;
       const restock = new Map();
       const returnRecords = [];
@@ -171,18 +177,12 @@ router.post('/', async (req, res) => {
         returnRecords.push({ invoiceId: original.id, customerId: original.customerId, groupRefund, lines });
       }
 
-      // --- Store credit the customer spends on this bill -------------------
-      // Capped at the balance AND at what's still owed after returns, so
-      // credit only ever reduces the payable — it can never be cashed out by
-      // "spending" more of it than the purchase is worth.
       let creditApplied = 0;
       if (body.creditApplied > 0) {
         if (!customer) throw Object.assign(new Error('A customer is required to use store credit'), { status: 400 });
         creditApplied = round2(Math.min(body.creditApplied, customer.creditBalance, Math.max(0, saleTotal - returnValue)));
       }
 
-      // Net the returns and any spent credit against the sale. A positive net
-      // is what the customer still pays; a negative net is money owed back.
       const netBill = round2(saleTotal - returnValue - creditApplied);
       const payable = round2(Math.max(0, netBill));
       const grossRefund = round2(Math.max(0, -netBill));
@@ -194,8 +194,6 @@ router.post('/', async (req, res) => {
         }
       }
 
-      // Old due the customer wants cleared on this bill, capped at what they
-      // actually owe (never raised by anything the client sends).
       let duePaidIntent = 0;
       if (body.duePaid > 0) {
         if (!customer) {
@@ -204,28 +202,31 @@ router.post('/', async (req, res) => {
         duePaidIntent = round2(Math.min(body.duePaid, customer.totalDue));
       }
 
-      // Every source of money on this bill goes into ONE pool before being
-      // allocated, in order: goods first, then the old due, then whatever's
-      // left goes back to the customer as change/refund. Pooling the gross
-      // refund together with tendered cash is the key fix here — a customer
-      // returning something worth more than what they're buying can have
-      // that refund fund an old-due clearance directly, with no fresh cash
-      // changing hands. The previous version only pulled from tendered cash,
-      // so a due-clear requested on a pure-return bill (nothing to "tender")
-      // silently never applied — the balance just sat there unchanged.
-      const tenderedCash = body.paymentMethod === 'CASH' ? body.amountPaid : payable + duePaidIntent;
-      const pool = round2(tenderedCash + grossRefund);
+      // Split payments: resolve payment lines
+      let paymentLines = [];
+      if (body.payments && body.payments.length > 0) {
+        paymentLines = body.payments
+          .filter((p) => p.amount > 0)
+          .map((p) => ({ method: p.method, amount: round2(p.amount) }));
+      } else {
+        // Legacy single payment
+        paymentLines = [{ method: body.paymentMethod, amount: round2(body.amountPaid) }];
+      }
+
+      const totalTendered = round2(paymentLines.reduce((s, p) => s + p.amount, 0));
+      const cashTendered = round2(paymentLines.filter((p) => p.method === 'CASH').reduce((s, p) => s + p.amount, 0));
+
+      const pool = round2(totalTendered + grossRefund);
       const amountPaid = round2(Math.min(pool, payable));
       const afterGoods = round2(Math.max(0, pool - amountPaid));
       const previousDuePaid = round2(Math.min(duePaidIntent, afterGoods));
       const leftover = round2(Math.max(0, afterGoods - previousDuePaid));
-      // Only ever one of these is nonzero: a change-y "leftover" reads as
-      // GST/receipt "Change" on an ordinary purchase, and as "Refund" on a
-      // bill whose net was a return/credit overage.
-      const changeDue = grossRefund > 0 ? 0 : leftover;
+      const changeDue = grossRefund > 0 ? 0 : (grossRefund === 0 && totalTendered > 0 ? round2(Math.max(0, totalTendered - amountPaid - previousDuePaid)) : 0);
       const refundValue = grossRefund > 0 ? leftover : 0;
 
-      // Paying short of the net payable becomes a new due — needs a customer.
+      // Primary payment method for the invoice record (first non-zero payment, or first in list)
+      const primaryMethod = paymentLines.length > 0 ? paymentLines[0].method : body.paymentMethod;
+
       const dueAmount = round2(Math.max(0, payable - amountPaid));
       if (dueAmount > 0 && !customer) {
         throw Object.assign(
@@ -248,7 +249,7 @@ router.post('/', async (req, res) => {
           taxAmount: computed.taxAmount,
           loyaltyDiscount: computed.loyaltyDiscount,
           totalAmount: computed.totalAmount,
-          paymentMethod: body.paymentMethod,
+          paymentMethod: primaryMethod,
           amountPaid,
           changeDue,
           dueAmount,
@@ -264,13 +265,23 @@ router.post('/', async (req, res) => {
         include: { items: true },
       });
 
+      // Create individual payment records for split payments
+      const savedPayments = [];
+      if (paymentLines.length > 0) {
+        for (const p of paymentLines) {
+          const pay = await tx.invoicePayment.create({
+            data: { invoiceId: created.id, method: p.method, amount: p.amount },
+          });
+          savedPayments.push(pay);
+        }
+      }
+
       if (previousDuePaid > 0) {
         await tx.customerDuePayment.create({
           data: { customerId: customer.id, amount: previousDuePaid, note: `Bill ${invoiceNumber}` },
         });
       }
 
-      // Persist the returns (audit trail) and restock the returned units.
       for (const rr of returnRecords) {
         await tx.return.create({
           data: {
@@ -295,16 +306,6 @@ router.post('/', async (req, res) => {
       }
 
       if (customer) {
-        // totalDue ("udhaar") and creditBalance are the running balances the
-        // POS reads back on the customer's next visit. They used to be kept
-        // with Prisma `increment`, which performs the addition inside SQLite's
-        // REAL (float) column — so tiny binary rounding residue accumulated
-        // across many bills and a fully-paid customer could keep showing e.g.
-        // Rs. 0.00…03 still owing that never cleared, and reappeared on the
-        // next bill. Compute the new balances in JS and round to paise so the
-        // stored value is always clean (round2 collapses sub-paise noise to
-        // exactly 0). Safe read-modify-write: we're inside the checkout
-        // $transaction and already hold this customer row.
         const newTotalDue = round2(customer.totalDue + dueAmount - previousDuePaid);
         const creditDelta = (refundMode === 'CREDIT' ? refundValue : 0) - creditApplied;
         const newCredit = round2(customer.creditBalance + creditDelta);
@@ -320,8 +321,20 @@ router.post('/', async (req, res) => {
         });
       }
 
-      return created;
+      // Return just the id so we can re-fetch with payments outside transaction
+      return { id: created.id };
     });
+
+    // Re-fetch invoice with items + payments after transaction commits
+    const invoice = await prisma.invoice.findUnique({
+      where: { id: invoiceStub.id },
+      include: { items: true, payments: true },
+    });
+
+    // Post double-entry journal for this invoice (fire-and-forget, errors logged)
+    journalFromInvoice(invoice).catch((err) =>
+      console.error('[auto-journal] Post-checkout journal failed:', err.message)
+    );
 
     res.status(201).json(invoice);
   } catch (err) {
@@ -520,7 +533,7 @@ router.get('/export.csv', async (req, res) => {
 router.get('/:id', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid invoice id' });
-  const invoice = await prisma.invoice.findUnique({ where: { id }, include: { items: true } });
+  const invoice = await prisma.invoice.findUnique({ where: { id }, include: { items: true, payments: true } });
   if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
   res.json(invoice);
 });

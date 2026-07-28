@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const { getJwtSecret } = require('../lib/secret');
 const prisma = require('../lib/prisma');
+const { getPermissionsForUser } = require('../lib/permissions');
 
 const JWT_SECRET = getJwtSecret();
 const TOKEN_COOKIE = 'nodedr_session';
@@ -27,9 +28,6 @@ function clearSessionCookie(res) {
   res.clearCookie(TOKEN_COOKIE, { path: '/' });
 }
 
-// Verifies the session cookie AND re-checks the user still exists and is
-// active on every request, so a deactivated account is locked out
-// immediately rather than staying valid until the token expires.
 async function requireAuth(req, res, next) {
   const token = req.cookies?.[TOKEN_COOKIE];
   if (!token) return res.status(401).json({ error: 'Not authenticated' });
@@ -47,14 +45,11 @@ async function requireAuth(req, res, next) {
     return res.status(401).json({ error: 'Account not found or disabled' });
   }
 
-  req.user = { id: user.id, name: user.name, email: user.email, role: user.role };
+  const permissions = getPermissionsForUser(user);
+  req.user = { id: user.id, name: user.name, email: user.email, role: user.role, permissions };
   next();
 }
 
-// Non-blocking session check: returns the token payload if a valid session
-// cookie is present, else null. Unlike requireAuth it never responds — for
-// endpoints that serve BOTH logged-in and anonymous callers different data
-// (e.g. GET /api/settings hides tax identifiers from anonymous LAN clients).
 function readSession(req) {
   const token = req.cookies?.[TOKEN_COOKIE];
   if (!token) return null;
@@ -72,12 +67,22 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+function requirePermission(permission) {
+  return (req, res, next) => {
+    if (!req.user?.permissions?.includes(permission)) {
+      return res.status(403).json({ error: `Permission denied: ${permission}` });
+    }
+    next();
+  };
+}
+
 module.exports = {
   issueToken,
   setSessionCookie,
   clearSessionCookie,
   requireAuth,
   requireAdmin,
+  requirePermission,
   readSession,
   TOKEN_COOKIE,
 };

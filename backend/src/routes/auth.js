@@ -10,6 +10,7 @@ const {
   requireAuth,
   requireAdmin,
 } = require('../middleware/auth');
+const { getPermissionsForUser } = require('../lib/permissions');
 
 const router = express.Router();
 
@@ -94,6 +95,11 @@ router.get('/me', requireAuth, async (req, res) => {
   res.json(publicUser(user));
 });
 
+// GET /api/auth/permissions — returns the effective permissions for the current user
+router.get('/permissions', requireAuth, async (req, res) => {
+  res.json({ permissions: req.user.permissions, role: req.user.role });
+});
+
 // POST /api/auth/change-password — any logged-in user changes their own password
 const changePasswordSchema = z.object({
   currentPassword: z.string().min(1),
@@ -124,7 +130,7 @@ const createUserSchema = z.object({
   name: z.string().trim().min(1).max(100),
   email: z.string().trim().toLowerCase().email().max(200),
   password: z.string().min(8).max(200),
-  role: z.enum(['admin', 'cashier']).default('cashier'),
+  role: z.enum(['admin', 'manager', 'accountant', 'cashier']).default('cashier'),
 });
 router.post('/users', requireAuth, requireAdmin, async (req, res) => {
   const parsed = createUserSchema.safeParse(req.body);
@@ -143,7 +149,7 @@ router.post('/users', requireAuth, requireAdmin, async (req, res) => {
 
 const updateUserSchema = z.object({
   name: z.string().trim().min(1).max(100).optional(),
-  role: z.enum(['admin', 'cashier']).optional(),
+  role: z.enum(['admin', 'manager', 'accountant', 'cashier']).optional(),
   active: z.boolean().optional(),
   password: z.string().min(8).max(200).optional(),
 });
@@ -160,7 +166,7 @@ router.put('/users/:id', requireAuth, requireAdmin, async (req, res) => {
   if (!target) return res.status(404).json({ error: 'User not found' });
 
   // Guard against locking yourself out or removing the last admin.
-  if (target.role === 'admin' && (parsed.data.role === 'cashier' || parsed.data.active === false)) {
+  if (target.role === 'admin' && (parsed.data.role && parsed.data.role !== 'admin' || parsed.data.active === false)) {
     const adminCount = await prisma.user.count({ where: { role: 'admin', active: true } });
     if (adminCount <= 1) {
       return res.status(400).json({ error: 'Cannot demote or disable the last active admin' });

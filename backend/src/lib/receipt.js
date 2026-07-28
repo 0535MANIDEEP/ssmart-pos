@@ -40,13 +40,7 @@ function buildReceiptHtml({ shop, invoice }) {
     .map(
       (it) => `
         <tr>
-          <td>${esc(it.name)}${
-            it.hsn ? ` <span class="sub">(HSN: ${esc(it.hsn)})</span>` : ''
-          }${
-            shop.gstEnabled && shop.showGst && it.taxRate > 0
-              ? `<div class="sub">GST @ ${it.taxRate}%</div>`
-              : ''
-          }</td>
+          <td>${esc(it.name)}</td>
           <td class="num">${it.quantity}${it.unit ? ` ${esc(it.unit)}` : ''}</td>
           <td class="num">${money(it.price)}</td>
           <td class="num">${money(it.price * it.quantity)}</td>

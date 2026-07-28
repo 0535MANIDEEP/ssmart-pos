@@ -14,8 +14,8 @@ export const Field = forwardRef<HTMLInputElement, FieldProps>(function Field(
   const inputId = id || generatedId;
 
   return (
-    <div className="flex flex-col gap-1.5">
-      <label htmlFor={inputId} className="text-sm font-medium text-foreground">
+    <div className="flex flex-col gap-1">
+      <label htmlFor={inputId} className="text-[13px] font-medium text-foreground">
         {label}
       </label>
       <input
@@ -24,14 +24,15 @@ export const Field = forwardRef<HTMLInputElement, FieldProps>(function Field(
         aria-invalid={!!error}
         aria-describedby={error ? `${inputId}-error` : undefined}
         className={clsx(
-          "rounded-lg border border-border bg-surface px-3 py-2.5 text-sm text-foreground placeholder:text-foreground/40 focus:outline-none focus:ring-2 focus:ring-brand",
-          error && "border-danger focus:ring-danger",
+          "h-9 rounded-md border border-border bg-surface px-3 text-[13px] text-foreground placeholder:text-text-tertiary",
+          "focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand/20",
+          error && "border-danger focus:ring-danger/20",
           className
         )}
         {...props}
       />
       {error && (
-        <p id={`${inputId}-error`} className="text-sm text-danger">
+        <p id={`${inputId}-error`} className="text-[12px] text-danger">
           {error}
         </p>
       )}

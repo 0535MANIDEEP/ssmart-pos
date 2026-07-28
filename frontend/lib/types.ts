@@ -1,4 +1,16 @@
-export type Role = "admin" | "cashier";
+export type Role = "admin" | "manager" | "accountant" | "cashier";
+
+export type Permission =
+  | "products:read" | "products:write" | "products:delete"
+  | "customers:read" | "customers:write"
+  | "invoices:read" | "invoices:create" | "invoices:return"
+  | "accounting:read" | "accounting:write" | "accounting:manage"
+  | "expenses:read" | "expenses:write"
+  | "reports:view"
+  | "settings:read" | "settings:write"
+  | "users:read" | "users:manage"
+  | "backup:manage"
+  | "migration:run";
 
 export interface AuthUser {
   id: number;
@@ -6,6 +18,11 @@ export interface AuthUser {
   email: string;
   role: Role;
   active: boolean;
+}
+
+export interface PermissionsResponse {
+  permissions: Permission[];
+  role: Role;
 }
 
 export interface ShopSettings {
@@ -36,6 +53,9 @@ export interface ShopSettings {
   lowStockAlert: number;
   allowNegativeStock: boolean;
   pincode: string | null;
+  showHsnOnPdf: boolean;
+  backupSchedule: string;
+  backupRetention: number;
 }
 
 export interface Product {
@@ -106,6 +126,12 @@ export interface Invoice {
   pointsEarned: number;
   createdAt: string;
   items: InvoiceItem[];
+  payments?: InvoicePayment[];
+}
+
+export interface InvoicePayment {
+  method: "CASH" | "UPI" | "CARD";
+  amount: number;
 }
 
 export interface CartItem {

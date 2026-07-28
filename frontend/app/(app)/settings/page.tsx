@@ -7,6 +7,7 @@ import { Field } from "@/components/ui/Field";
 import { Select } from "@/components/ui/Select";
 import { Toggle } from "@/components/ui/Toggle";
 import { Button } from "@/components/ui/Button";
+import { ThemeToggle } from "@/components/ThemeToggle";
 import { useToast } from "@/components/Toast";
 import { useCurrencies, useShopSettings, useUpdateSettings } from "@/hooks/useShopSettings";
 import { api, ApiError } from "@/lib/api";
@@ -15,8 +16,9 @@ import type { PinCodeRecord } from "@/hooks/useMasters";
 import type { ShopSettings } from "@/lib/types";
 import { UsersPanel } from "./UsersPanel";
 import { ReferenceDataTab } from "./ReferenceDataTab";
+import MigrateFromMarg from "./MigrateFromMarg";
 
-const TABS = ["Company", "Tax & Loyalty", "Receipt", "Reference Data", "Password", "Staff"] as const;
+const TABS = ["Display", "Company", "Tax & Loyalty", "Receipt", "Reference Data", "Migration", "Backup", "Password", "Staff"] as const;
 type Tab = (typeof TABS)[number];
 
 export default function SettingsPage() {
@@ -47,13 +49,28 @@ export default function SettingsPage() {
         ))}
       </div>
 
+      {tab === "Display" && <DisplayTab />}
       {tab === "Company" && <CompanyTab settings={settings} />}
       {tab === "Tax & Loyalty" && <TaxLoyaltyTab settings={settings} />}
       {tab === "Receipt" && <ReceiptTab settings={settings} />}
       {tab === "Reference Data" && <ReferenceDataTab />}
+      {tab === "Migration" && <MigrateFromMarg />}
+      {tab === "Backup" && <BackupTab />}
       {tab === "Password" && <PasswordTab />}
       {tab === "Staff" && <UsersPanel />}
     </div>
+  );
+}
+
+function DisplayTab() {
+  return (
+    <Card className="max-w-2xl p-6">
+      <h2 className="mb-4 text-base font-semibold text-foreground">Appearance</h2>
+      <p className="mb-4 text-sm text-text-secondary">
+        Choose how SS Mart looks. Your preference is saved and applied every time you open the app.
+      </p>
+      <ThemeToggle />
+    </Card>
   );
 }
 
@@ -449,6 +466,42 @@ function ReceiptTab({ settings }: { settings: ShopSettings }) {
               ))}
             </ul>
           </div>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+function BackupTab() {
+  const { show } = useToast();
+  const [busy, setBusy] = useState(false);
+  const [lastBackup, setLastBackup] = useState<string | null>(null);
+
+  async function triggerBackup() {
+    setBusy(true);
+    try {
+      const result = await api.post<{ dest: string }>("/backup");
+      show("Backup completed successfully", "success");
+      setLastBackup(result.dest);
+    } catch (err) {
+      show(err instanceof ApiError ? err.message : "Backup failed", "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card className="max-w-2xl p-6">
+      <h2 className="mb-2 text-base font-semibold text-foreground">Database Backup</h2>
+      <p className="mb-4 text-sm text-foreground/60">
+        Create a manual backup of your entire database. Backups run automatically at 2 AM IST daily and are retained for 30 days.
+      </p>
+      <div className="flex flex-col gap-4">
+        <Button type="button" onClick={triggerBackup} disabled={busy} className="self-start">
+          {busy ? "Backing up..." : "Create Backup Now"}
+        </Button>
+        {lastBackup && (
+          <p className="text-xs text-foreground/50">Last backup: {lastBackup}</p>
         )}
       </div>
     </Card>

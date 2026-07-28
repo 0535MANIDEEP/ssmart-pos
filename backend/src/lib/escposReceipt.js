@@ -145,8 +145,7 @@ function buildReceiptEscPos({ shop, invoice, width = 42 }) {
   // receipts' table, just laid out for a narrow fixed-width strip instead
   // of a wide proportional-font table.
   for (const item of invoice.items) {
-    const nameWithHsn = item.hsn ? `${item.name} (HSN:${item.hsn})` : item.name;
-    for (const l of wrap(nameWithHsn, width)) push(l);
+    for (const l of wrap(item.name, width)) push(l);
     const qty = `${item.quantity}${item.unit ? ` ${item.unit}` : ''}`;
     push(row(`  ${qty} x ${money(item.price)}`, money(item.price * item.quantity), width));
     if (shop.gstEnabled && shop.showGst && item.taxRate > 0) {

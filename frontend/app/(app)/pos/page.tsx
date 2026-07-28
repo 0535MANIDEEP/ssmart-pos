@@ -1,13 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Minus, Plus, ScanBarcode, Trash2, Search, Star, CheckCircle2, X } from "lucide-react";
+import {
+  Minus, Plus, ScanBarcode, Trash2, Search, Star, CheckCircle2, X,
+  ArrowLeft, RotateCcw, Banknote, CreditCard, Smartphone, CircleDollarSign,
+} from "lucide-react";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Field } from "@/components/ui/Field";
 import { ReceiptActions } from "@/components/ReceiptActions";
 import { ReturnPanel, type ReturnDraftLine } from "@/components/ReturnPanel";
+import { QuantityPopover } from "@/components/QuantityPopover";
 import { useBarcodeScanner } from "@/hooks/useBarcodeScanner";
 import { useProducts } from "@/hooks/useProducts";
 import { useShopSettings } from "@/hooks/useShopSettings";
@@ -16,12 +20,28 @@ import { api, ApiError, describeApiError } from "@/lib/api";
 import { formatMoney, round2 } from "@/lib/format";
 import { openReceiptPrint } from "@/lib/print";
 import { effectivePrice, quoteSale } from "@/lib/quote";
+import { loadDrafts, saveDraft, deleteDraft } from "@/lib/drafts";
+import { loadDraftsLocal, saveDraftLocal, deleteDraftLocal } from "@/lib/drafts-local";
 import type { CartItem, Customer, Invoice, PaymentMethod, Product } from "@/lib/types";
+
+interface PaymentLine {
+  method: PaymentMethod;
+  amount: number;
+}
+
+function isInputFocused() {
+  const el = document.activeElement as HTMLElement | null;
+  if (!el) return false;
+  const tag = el.tagName.toLowerCase();
+  return tag === "input" || tag === "textarea" || tag === "select" || el.isContentEditable;
+}
 
 export default function PosPage() {
   const { data: shop } = useShopSettings();
   const { show } = useToast();
   const queryClient = useQueryClient();
+  const posRef = useRef<HTMLDivElement>(null);
+  const qtyInputRef = useRef<HTMLInputElement>(null);
 
   const [cart, setCart] = useState<CartItem[]>([]);
   const [customer, setCustomer] = useState<Customer | null>(null);
@@ -34,19 +54,61 @@ export default function PosPage() {
   const [discountType, setDiscountType] = useState<"percent" | "amount" | null>(null);
   const [discountValue, setDiscountValue] = useState(0);
   const [pointsRedeemed, setPointsRedeemed] = useState(0);
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("CASH");
-  const [amountPaid, setAmountPaid] = useState("");
+  const [payments, setPayments] = useState<PaymentLine[]>([{ method: "CASH", amount: 0 }]);
   const [isCheckingOut, setIsCheckingOut] = useState(false);
-  const [completedSale, setCompletedSale] = useState<{ id: number; invoiceNumber: string; totalAmount: number } | null>(
-    null
-  );
-
-  // Manual add — the fallback for when the barcode scanner isn't working: type
-  // a product name or barcode and pick from the matches. Debounced so we don't
-  // hit the API on every keystroke; setState lives in the timeout callback (not
-  // the effect body) to satisfy the React Compiler lint rules.
+  const [completedSale, setCompletedSale] = useState<{ id: number; invoiceNumber: string; totalAmount: number; changeDue: number; payments: { method: string; amount: number }[] } | null>(null);
+  const [autoSaveStatus, setAutoSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
+  const [showShutdownDialog, setShowShutdownDialog] = useState(false);
   const [manualQuery, setManualQuery] = useState("");
   const [committedQuery, setCommittedQuery] = useState("");
+  const [focusedCartIndex, setFocusedCartIndex] = useState<number | null>(null);
+  const [recoveryDraft, setRecoveryDraft] = useState<{ id: number; state: Record<string, unknown>; updatedAt: string } | null>(null);
+  const [showRecoveryDialog, setShowRecoveryDialog] = useState(false);
+  const billIdRef = useRef(`bill_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`);
+  const draftDbIdRef = useRef<number | null>(null);
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountedRef = useRef(false);
+
+  // Crash recovery: check for existing drafts on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        let draft: { id: number; state: Record<string, unknown>; updatedAt: string } | null = null;
+        try {
+          const all = await loadDrafts();
+          draft = all.find((d) => d.billId && d.billId !== billIdRef.current && ((d.state as any)?.cartItems?.length ?? 0) > 0) ?? null;
+        } catch {}
+        if (!draft) {
+          try {
+            const allLocal = await loadDraftsLocal();
+            draft = allLocal.find((d) => d.billId && d.billId !== billIdRef.current && ((d.state as any)?.cartItems?.length ?? 0) > 0) ?? null;
+          } catch {}
+        }
+        if (draft) {
+          setRecoveryDraft(draft);
+          setShowRecoveryDialog(true);
+        }
+      } catch {}
+      mountedRef.current = true;
+    })();
+  }, []);
+
+  // Auto-save bill state every 5 seconds (debounced)
+  useEffect(() => {
+    if (!mountedRef.current) return;
+    if (cart.length === 0 && !customerName && !customerPhone) return;
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    autoSaveTimerRef.current = setTimeout(async () => {
+      const state = { cart, customerName, customerPhone, discountType, discountValue, payments, pointsRedeemed, duePaid: Number(duePaid) || 0, returns: returnLines };
+      try { await saveDraft(billIdRef.current, "Current Bill", state); } catch {}
+      try { await saveDraftLocal({ id: draftDbIdRef.current ?? 0, billId: billIdRef.current, label: "Current Bill", isHeld: false, state, updatedAt: new Date().toISOString() }); } catch {}
+      setAutoSaveStatus("saved");
+      setTimeout(() => setAutoSaveStatus("idle"), 2000);
+    }, 5000);
+    setAutoSaveStatus("saving");
+    return () => { if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current); };
+  }, [cart, customerName, customerPhone, discountType, discountValue, payments, pointsRedeemed, duePaid, returnLines]);
+
   useEffect(() => {
     const t = setTimeout(() => setCommittedQuery(manualQuery.trim()), 200);
     return () => clearTimeout(t);
@@ -61,44 +123,30 @@ export default function PosPage() {
     [cart, discountType, discountValue, pointsRedeemed, shop]
   );
 
-  // Old due the cashier is folding into this bill (capped at what's owed).
   const dueToClear = customer ? Math.min(Math.max(0, Number(duePaid) || 0), customer.totalDue) : 0;
-
-  // Returns queued on this bill and their refund value.
   const returnTotal = round2(returnLines.reduce((s, l) => s + l.refundAmount, 0));
   const creditAvail = customer?.creditBalance ?? 0;
-  // Store credit only ever reduces what's payable — never enough to create a
-  // refund on its own — so cap it at the sale-minus-returns amount.
   const creditUse = useCredit ? round2(Math.min(creditAvail, Math.max(0, quote.total - returnTotal))) : 0;
-
-  // Net the returns and credit against the sale. Positive → the customer pays;
-  // negative → the shop owes them (refund).
   const netBill = round2(quote.total - returnTotal - creditUse);
   const payable = Math.max(0, netBill);
   const grossRefund = Math.max(0, round2(-netBill));
 
-  // Mirrors backend/src/routes/invoices.js exactly: every source of money on
-  // this bill (tendered cash, and any gross refund from returns/credit) goes
-  // into one pool, allocated goods first, then the old due, then whatever's
-  // left is change/refund. Without pooling the refund in here too, this
-  // preview showed the FULL return value as "refund" even when some of it
-  // was about to go straight to clearing the customer's due — a cashier
-  // reading that number had no way to tell the due-clear had actually worked.
-  const tenderedCash = paymentMethod === "CASH" ? Number(amountPaid) || 0 : payable + dueToClear;
-  const pool = round2(tenderedCash + grossRefund);
+  // Split payments calculations
+  const totalTendered = round2(payments.reduce((s, p) => s + p.amount, 0));
+  const cashTendered = round2(payments.filter((p) => p.method === "CASH").reduce((s, p) => s + p.amount, 0));
+
+  const pool = round2(totalTendered + grossRefund);
   const amountAppliedToGoods = round2(Math.min(pool, payable));
   const afterGoods = round2(Math.max(0, pool - amountAppliedToGoods));
   const duePaidFinal = round2(Math.min(dueToClear, afterGoods));
   const leftover = round2(Math.max(0, afterGoods - duePaidFinal));
-  const changeDue = grossRefund > 0 ? 0 : leftover;
+  const changeDue = grossRefund === 0 && totalTendered > 0 ? round2(Math.max(0, totalTendered - amountAppliedToGoods - duePaidFinal)) : 0;
   const refundValue = grossRefund > 0 ? leftover : 0;
-
-  // "Paid in full" convenience total: goods + due, assuming the cashier
-  // brings fresh cash rather than drawing the due-clear out of a refund.
   const collectTotal = round2(payable + dueToClear);
+  const remainingToPay = round2(Math.max(0, collectTotal - totalTendered));
   const shortNow =
-    paymentMethod === "CASH" && Number(amountPaid) > 0 && grossRefund === 0
-      ? Math.max(0, round2(collectTotal - (Number(amountPaid) || 0)))
+    totalTendered > 0 && grossRefund === 0
+      ? Math.max(0, round2(collectTotal - totalTendered))
       : 0;
 
   const addToCart = useCallback(
@@ -115,6 +163,7 @@ export default function PosPage() {
           item.product.id === product.id ? { ...item, quantity: item.quantity + 1 } : item
         );
       });
+      setFocusedCartIndex(null);
     },
     [show]
   );
@@ -140,21 +189,17 @@ export default function PosPage() {
       setCustomer(c);
       setCustomerName(c.name);
       setDuePaid("");
-      show(`${c.name} — ${c.loyaltyPoints} points`, "success");
+      show(`${c.name} \u2014 ${c.loyaltyPoints} points`, "success");
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
         setCustomer(null);
-        show("New customer — will be created on checkout", "info");
+        show("New customer \u2014 will be created on checkout", "info");
       } else {
         show("Customer lookup failed", "error");
       }
     }
   }
 
-  // A return is often the FIRST thing typed on a bill — the cashier may
-  // never touch the phone field at all. Without this, "Store credit" and
-  // "Use store credit" stay silently disabled (no customer attached) and
-  // look like the app just isn't responding to the click.
   function onReturnInvoiceFound(info: { customerPhone: string | null; customerName: string }) {
     if (!info.customerPhone) return;
     setCustomerPhone(info.customerPhone);
@@ -174,20 +219,17 @@ export default function PosPage() {
     setDiscountType(null);
     setDiscountValue(0);
     setPointsRedeemed(0);
-    setPaymentMethod("CASH");
-    setAmountPaid("");
+    setPayments([{ method: "CASH", amount: 0 }]);
+    setFocusedCartIndex(null);
   };
 
-  // A bill is submittable if it sells something, returns something, or
-  // collects a previous due — the last case lets a customer walk in only to
-  // pay off their udhaar, with no purchase, straight from the register.
   const canFinalize = cart.length > 0 || returnLines.length > 0 || dueToClear > 0;
 
   const finalizeSale = useCallback(async () => {
     if (!canFinalize || isCheckingOut) return;
     setIsCheckingOut(true);
+    setShowShutdownDialog(false);
     try {
-      // Group the flat return lines back by their original invoice.
       const returnsPayload = Object.values(
         returnLines.reduce(
           (acc, l) => {
@@ -209,42 +251,40 @@ export default function PosPage() {
         discountType,
         discountValue: Number(discountValue) || 0,
         pointsRedeemed: Number(pointsRedeemed) || 0,
-        paymentMethod,
-        amountPaid: paymentMethod === "CASH" ? Number(amountPaid) || 0 : 0,
+        payments: payments.filter((p) => p.amount > 0),
         duePaid: dueToClear,
         returns: returnsPayload,
         refundMode,
         creditApplied: creditUse,
       });
 
-      const parts = [`${invoice.invoiceNumber} · ${money(invoice.totalAmount)}`];
+      const parts = [`${invoice.invoiceNumber} \u00b7 ${money(invoice.totalAmount)}`];
       if (invoice.previousDuePaid > 0) parts.push(`${money(invoice.previousDuePaid)} due cleared`);
       if (invoice.refundValue > 0)
         parts.push(`${money(invoice.refundValue)} refunded (${invoice.refundMode === "CREDIT" ? "store credit" : "cash"})`);
-      show(`Done — ${parts.join(" · ")}`, "success");
+      if (invoice.discountAmount > 0) parts.push(`${money(invoice.discountAmount)} discount applied`);
+      show(`Done \u2014 ${parts.join(" \u00b7 ")}`, "success");
       queryClient.invalidateQueries({ queryKey: ["products"] });
       queryClient.invalidateQueries({ queryKey: ["invoices"] });
       queryClient.invalidateQueries({ queryKey: ["customers"] });
-      setCompletedSale({ id: invoice.id, invoiceNumber: invoice.invoiceNumber, totalAmount: invoice.totalAmount });
+      setCompletedSale({
+        id: invoice.id,
+        invoiceNumber: invoice.invoiceNumber,
+        totalAmount: invoice.totalAmount,
+        changeDue: invoice.changeDue,
+        payments: payments.filter((p) => p.amount > 0).map((p) => ({ method: p.method, amount: p.amount })),
+      });
       resetSale();
+      // Clear draft after successful checkout
+      try { if (draftDbIdRef.current) await deleteDraft(draftDbIdRef.current); } catch {}
+      try { if (draftDbIdRef.current) await deleteDraftLocal(draftDbIdRef.current); } catch {}
+      draftDbIdRef.current = null;
       if (shop?.autoPrintReceipt) {
         if (shop.autoPrintMethod === "usb") {
-          // Send straight to the USB thermal printer — a plain async request,
-          // NOT the modal window.print() dialog. On a Debian till with no
-          // browser-configured printer that dialog has nothing to open and
-          // freezes the screen after every sale (which showed up as checkout
-          // "hanging", especially on store-credit/refund bills); the USB path
-          // has no dialog to hang on. Fire-and-forget with a toast on failure
-          // so a printer problem never blocks the next customer.
           api.post(`/print/${invoice.id}/usb`).catch((err) =>
             show(err instanceof ApiError ? err.message : "Auto-print to USB printer failed", "error")
           );
         } else {
-          // Deferred one tick so the "Sale complete" card is definitely
-          // painted before the OS print dialog opens — window.print() is
-          // modal in most browsers and pauses the tab, which otherwise can
-          // read as the app having frozen mid-checkout instead of having
-          // already finished.
           setTimeout(() => openReceiptPrint(invoice.id), 0);
         }
       }
@@ -254,7 +294,7 @@ export default function PosPage() {
       setIsCheckingOut(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cart, returnLines, refundMode, creditUse, customerName, customerPhone, discountType, discountValue, pointsRedeemed, paymentMethod, amountPaid, dueToClear, canFinalize, isCheckingOut, queryClient, show, shop?.autoPrintReceipt, shop?.autoPrintMethod]);
+  }, [cart, returnLines, refundMode, creditUse, customerName, customerPhone, discountType, discountValue, pointsRedeemed, payments, dueToClear, canFinalize, isCheckingOut, queryClient, show, shop?.autoPrintReceipt, shop?.autoPrintMethod]);
 
   useBarcodeScanner({
     onScan: handleScan,
@@ -280,78 +320,226 @@ export default function PosPage() {
         })
         .filter((item) => item.quantity > 0)
     );
+    setFocusedCartIndex(null);
+  }
+
+  function removeFromCart(productId: number) {
+    setCart((prev) => prev.filter((item) => item.product.id !== productId));
+    setFocusedCartIndex(null);
+  }
+
+  function setQuantityDirect(productId: number, qty: number) {
+    if (qty <= 0) { removeFromCart(productId); return; }
+    setCart((prev) =>
+      prev.map((item) => {
+        if (item.product.id !== productId) return item;
+        const capped = Math.min(qty, item.product.stock);
+        if (capped <= 0) return item;
+        return { ...item, quantity: capped };
+      })
+    );
+    setFocusedCartIndex(null);
   }
 
   const maxRedeemable = customer && shop?.loyaltyEnabled ? customer.loyaltyPoints : 0;
 
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (isInputFocused()) return;
+      if (e.key === "F5") { e.preventDefault(); resetSale(); show("Cart cleared", "info"); }
+      if (e.key === "F6") { e.preventDefault(); const phone = posRef.current?.querySelector('input[placeholder*="Phone"]') as HTMLElement | null; if (phone) phone.focus(); }
+      if (e.key === "F7") { e.preventDefault(); const disc = posRef.current?.querySelector('select[aria-label="Discount type"]') as HTMLElement | null; if (disc) disc.focus(); }
+      if (e.key === "F12" || e.key === "End") { e.preventDefault(); finalizeSale(); }
+      if (e.key === "Escape") { e.preventDefault(); setCompletedSale(null); setShowShutdownDialog(false); }
+      if ((e.ctrlKey || e.metaKey) && e.key === " ") { e.preventDefault(); const search = posRef.current?.querySelector('input[placeholder*="Scan or type"]') as HTMLElement | null; if (search) search.focus(); }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [finalizeSale, resetSale, show]);
+
   return (
-    <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="text-2xl font-semibold text-foreground">POS Checkout</h1>
-        <p className="flex items-center gap-1.5 text-sm text-foreground/60">
-          <ScanBarcode className="h-4 w-4" aria-hidden="true" />
-          Scan a barcode to add items. Press Enter to finalize.
-        </p>
+    <div ref={posRef} className="flex flex-col gap-4 h-full">
+      {/* POS Header */}
+      <div className="flex items-center justify-between rounded-xl border border-brand/20 bg-brand-light px-5 py-3">
+        <div className="flex items-center gap-4">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand text-white">
+            <ScanBarcode className="h-5 w-5" />
+          </div>
+          <div>
+            <h1 className="text-lg font-bold text-brand">POS Checkout</h1>
+            <p className="text-[11px] text-text-secondary">F1 Help · F5 New · F6 Customer · F7 Discount · F12 Checkout</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          {autoSaveStatus === "saving" && (
+            <span className="flex items-center gap-1.5 rounded-full border border-warning/30 bg-warning-light px-3 py-1 text-xs font-medium text-warning">
+              <span className="h-1.5 w-1.5 rounded-full bg-warning animate-pulse" />
+              Saving…
+            </span>
+          )}
+          {autoSaveStatus === "saved" && (
+            <span className="flex items-center gap-1.5 rounded-full border border-success/30 bg-success-light px-3 py-1 text-xs font-medium text-success">
+              <span className="h-1.5 w-1.5 rounded-full bg-success" />
+              Saved
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={() => setShowShutdownDialog(true)}
+            className="flex h-9 w-9 items-center justify-center rounded-lg text-text-secondary hover:bg-brand/10 hover:text-brand transition-colors"
+            aria-label="Shutdown"
+            title="Shutdown (Ctrl+Q)"
+          >
+            <ScanBarcode className="h-5 w-5" />
+          </button>
+        </div>
       </div>
 
       {completedSale && (
-        <Card className="flex flex-wrap items-center justify-between gap-4 border-brand/30 bg-brand/5 p-5">
-          <div className="flex items-center gap-3">
-            <CheckCircle2 className="h-6 w-6 shrink-0 text-brand" aria-hidden="true" />
+        <Card variant="success" className="flex flex-col gap-4 p-5 animate-slide-up">
+          <div className="flex items-center gap-4">
+            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-success/10">
+              <CheckCircle2 className="h-6 w-6 text-success" />
+            </div>
             <div>
-              <p className="text-sm font-semibold text-foreground">
+              <p className="text-base font-bold text-foreground">
                 {completedSale.invoiceNumber} · {money(completedSale.totalAmount)}
               </p>
-              <p className="text-xs text-foreground/60">
+              <p className="text-sm text-text-secondary">
                 {shop?.autoPrintReceipt ? "Sale complete — receipt sent to print." : "Sale complete — print or download the receipt below."}
               </p>
             </div>
           </div>
+
+          {/* Payment breakdown */}
+          {completedSale.payments.length > 0 && (
+            <div className="rounded-lg border border-border bg-surface-muted/40 p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary mb-2">Payment Received</p>
+              <div className="flex flex-col gap-1">
+                {completedSale.payments.map((p, i) => (
+                  <div key={i} className="flex items-center justify-between text-[13px]">
+                    <span className="flex items-center gap-1.5 text-text-secondary">
+                      {p.method === "CASH" && <Banknote className="h-3.5 w-3.5 text-success" />}
+                      {p.method === "UPI" && <Smartphone className="h-3.5 w-3.5 text-brand" />}
+                      {p.method === "CARD" && <CreditCard className="h-3.5 w-3.5 text-warning" />}
+                      {p.method}
+                    </span>
+                    <span className="font-medium text-foreground">{money(p.amount)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Balance to return — prominent for cashier */}
+          {completedSale.changeDue > 0 && (
+            <div className="rounded-lg border-2 border-warning/30 bg-warning/10 p-4 text-center">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-warning mb-1">Return Balance to Customer</p>
+              <p className="text-3xl font-bold text-warning">{money(completedSale.changeDue)}</p>
+              <p className="text-[11px] text-warning/70 mt-1">Count and return this amount</p>
+            </div>
+          )}
+
           <div className="flex items-center gap-2">
             <ReceiptActions invoiceId={completedSale.id} />
             <Button type="button" variant="ghost" onClick={() => setCompletedSale(null)}>
-              Dismiss
+              New sale
             </Button>
           </div>
         </Card>
       )}
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        {/* Cart */}
-        <Card className="p-5 lg:col-span-2">
-          <h2 className="mb-4 text-base font-semibold text-foreground">Cart</h2>
+      {showShutdownDialog && (
+        <Card variant="warning" className="p-6 max-w-md mx-auto animate-scale-in">
+          <h2 className="text-lg font-bold text-foreground mb-2">Backup before closing?</h2>
+          <p className="text-sm text-text-secondary mb-5">Create a database backup before ending the session.</p>
+          <div className="flex gap-3">
+            <Button type="button" variant="primary" onClick={async () => { try { await api.post("/backup/run"); show("Backup complete", "success"); } catch { show("Backup failed", "error"); } setShowShutdownDialog(false); finalizeSale(); }}>
+              Backup & Close
+            </Button>
+            <Button type="button" variant="secondary" onClick={() => { setShowShutdownDialog(false); finalizeSale(); }}>
+              Close Without Backup
+            </Button>
+            <Button type="button" variant="ghost" onClick={() => setShowShutdownDialog(false)}>
+              Cancel
+            </Button>
+          </div>
+        </Card>
+      )}
 
-          {/* Manual add — the scanner fallback. Always visible so a cashier can
-              still bill by typing a product name or barcode when the barcode
-              scanner is unplugged, dead, or the code won't scan. */}
-          <div className="relative mb-4">
-            <div className="flex items-center gap-2 rounded-lg border border-border px-3 py-2">
-              <Search className="h-4 w-4 shrink-0 text-foreground/40" aria-hidden="true" />
+      {showRecoveryDialog && recoveryDraft && (
+        <Card variant="brand" className="p-6 max-w-md mx-auto animate-scale-in">
+          <h2 className="text-lg font-bold text-foreground mb-2 flex items-center gap-2">
+            <RotateCcw className="h-5 w-5 text-brand" />
+            Recover previous bill?
+          </h2>
+          <p className="text-sm text-text-secondary mb-1">
+            An unsaved bill was found from a previous session.
+          </p>
+          <p className="text-xs text-text-tertiary mb-5">
+            {((recoveryDraft.state as any)?.cartItems?.length ?? 0)} items · Last saved {new Date(recoveryDraft.updatedAt).toLocaleString("en-IN")}
+          </p>
+          <div className="flex gap-3">
+            <Button type="button" variant="primary" onClick={() => {
+              const s = recoveryDraft.state as any;
+              if (s.cart) setCart(s.cart);
+              if (s.customerName) setCustomerName(s.customerName);
+              if (s.customerPhone) setCustomerPhone(s.customerPhone);
+              if (s.discountType) setDiscountType(s.discountType);
+              if (s.discountValue) setDiscountValue(s.discountValue);
+              if (s.payments) setPayments(s.payments);
+              if (s.pointsRedeemed) setPointsRedeemed(s.pointsRedeemed);
+              if (s.duePaid) setDuePaid(String(s.duePaid));
+              if (s.returns) setReturnLines(s.returns);
+              setShowRecoveryDialog(false);
+              show("Bill restored", "success");
+            }}>
+              Restore bill
+            </Button>
+            <Button type="button" variant="secondary" onClick={async () => {
+              try { await deleteDraft(recoveryDraft.id); } catch {}
+              try { await deleteDraftLocal(recoveryDraft.id); } catch {}
+              setShowRecoveryDialog(false);
+              show("Previous bill discarded", "info");
+            }}>
+              Discard
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3 flex-1 overflow-hidden">
+        {/* Cart */}
+        <Card className="p-4 lg:col-span-2 flex flex-col overflow-hidden">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-base font-semibold text-foreground">Cart</h2>
+            <span className="text-xs text-text-tertiary">Click qty to edit · Del to remove</span>
+          </div>
+
+          <div className="relative mb-3">
+            <div className="flex items-center gap-2 rounded-xl border border-border bg-surface-muted/50 px-3 py-2.5 focus-within:border-brand focus-within:ring-2 focus-within:ring-brand/20 transition-all">
+              <ScanBarcode className="h-4 w-4 shrink-0 text-text-tertiary" />
               <input
+                ref={qtyInputRef}
                 type="text"
                 value={manualQuery}
                 onChange={(e) => setManualQuery(e.target.value)}
-                placeholder="Scanner not working? Type a product name or barcode to add…"
+                placeholder="Scan barcode or type product name…"
                 aria-label="Add product manually"
-                className="w-full bg-transparent text-sm text-foreground outline-none placeholder:text-foreground/40"
+                className="w-full bg-transparent text-sm text-foreground outline-none placeholder:text-text-tertiary"
               />
               {manualQuery && (
-                <button
-                  type="button"
-                  aria-label="Clear search"
-                  onClick={() => setManualQuery("")}
-                  className="text-foreground/40 hover:text-foreground"
-                >
+                <button type="button" aria-label="Clear search" onClick={() => setManualQuery("")} className="text-foreground/40 hover:text-foreground">
                   <X className="h-4 w-4" aria-hidden="true" />
                 </button>
               )}
             </div>
             {committedQuery && (
-              <div className="absolute z-20 mt-1 max-h-72 w-full overflow-auto rounded-lg border border-border bg-surface shadow-lg">
+              <div className="absolute z-20 mt-1 max-h-64 w-full overflow-auto rounded-xl border border-border bg-surface shadow-xl animate-scale-in">
                 {!manualResults ? (
-                  <p className="px-3 py-2.5 text-sm text-foreground/50">Searching…</p>
+                  <p className="px-3 py-2.5 text-sm text-foreground/50">Searching\u2026</p>
                 ) : manualResults.length === 0 ? (
-                  <p className="px-3 py-2.5 text-sm text-foreground/50">No products match &ldquo;{committedQuery}&rdquo;.</p>
+                  <p className="px-3 py-2.5 text-sm text-foreground/50">No products match.</p>
                 ) : (
                   manualResults.slice(0, 8).map((p) => {
                     const outOfStock = p.stock <= 0 && !shop?.allowNegativeStock;
@@ -360,16 +548,12 @@ export default function PosPage() {
                         key={p.id}
                         type="button"
                         disabled={outOfStock}
-                        onClick={() => {
-                          addToCart(p);
-                          setManualQuery("");
-                          setCommittedQuery("");
-                        }}
+                        onClick={() => { addToCart(p); setManualQuery(""); setCommittedQuery(""); }}
                         className="flex w-full items-center justify-between gap-3 border-b border-border px-3 py-2.5 text-left text-sm last:border-b-0 hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         <span className="min-w-0 flex-1 truncate font-medium text-foreground">
                           {p.name}
-                          {p.barcode && <span className="ml-1.5 font-normal text-foreground/40">· {p.barcode}</span>}
+                          {p.barcode && <span className="ml-1.5 font-normal text-foreground/40">\u00b7 {p.barcode}</span>}
                         </span>
                         <span className="shrink-0 text-foreground/70">{money(effectivePrice(p))}</span>
                         <span className={`shrink-0 text-xs ${outOfStock ? "text-danger" : "text-foreground/40"}`}>
@@ -384,68 +568,61 @@ export default function PosPage() {
           </div>
 
           {cart.length === 0 ? (
-            <p className="py-10 text-center text-sm text-foreground/50">Cart is empty. Scan a product to begin.</p>
+            <div className="flex flex-1 flex-col items-center justify-center py-12 text-center">
+              <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-brand-light text-brand mb-4">
+                <ScanBarcode className="h-8 w-8" />
+              </div>
+              <p className="text-base font-medium text-foreground">Cart is empty</p>
+              <p className="text-sm text-text-tertiary mt-1">Scan a product or type to search</p>
+            </div>
           ) : (
-            <div className="overflow-x-auto">
+            <div className="flex-1 overflow-auto">
               <table className="w-full min-w-max text-left text-sm">
                 <thead>
-                  <tr className="text-xs uppercase text-foreground/50">
-                    <th className="py-2 pr-4">Item</th>
-                    <th className="py-2 pr-4">Qty</th>
-                    <th className="py-2 pr-4 text-right">Price</th>
-                    {shop?.gstEnabled && <th className="py-2 pr-4 text-right">GST</th>}
-                    <th className="py-2 pr-4 text-right">Total</th>
-                    <th className="py-2" />
+                  <tr className="border-b border-border text-xs uppercase tracking-wider text-text-tertiary">
+                    <th className="pb-2 pr-2 font-semibold">Item</th>
+                    <th className="pb-2 pr-2 font-semibold">MRP</th>
+                    <th className="pb-2 pr-2 font-semibold">Sell @</th>
+                    <th className="pb-2 pr-2 font-semibold">Qty</th>
+                    {shop?.gstEnabled && <th className="pb-2 pr-2 text-right font-semibold">GST</th>}
+                    <th className="pb-2 pr-2 text-right font-semibold">Total</th>
+                    <th className="pb-2" />
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-border">
-                  {cart.map((item) => (
-                    <tr key={item.product.id}>
-                      <td className="py-2.5 pr-4 font-medium text-foreground">
+                <tbody className="divide-y divide-border/50">
+                  {cart.map((item, idx) => (
+                    <tr
+                      key={item.product.id}
+                      className={`transition-colors hover:bg-surface-muted/50 ${focusedCartIndex === idx ? "bg-brand/5" : ""}`}
+                    >
+                      <td className="py-2 pr-2 font-medium text-foreground max-w-[180px] truncate">
                         {item.product.name}
                         {item.product.unit && <span className="ml-1.5 font-normal text-foreground/40">({item.product.unit})</span>}
                       </td>
-                      <td className="py-2.5 pr-4">
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            aria-label={`Decrease ${item.product.name}`}
-                            onClick={() => updateQuantity(item.product.id, -1)}
-                            className="flex h-7 w-7 items-center justify-center rounded-md border border-border hover:bg-surface-muted"
-                          >
-                            <Minus className="h-3.5 w-3.5" aria-hidden="true" />
-                          </button>
-                          <span className="w-6 text-center">{item.quantity}</span>
-                          <button
-                            type="button"
-                            aria-label={`Increase ${item.product.name}`}
-                            onClick={() => updateQuantity(item.product.id, 1)}
-                            className="flex h-7 w-7 items-center justify-center rounded-md border border-border hover:bg-surface-muted"
-                          >
-                            <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                          </button>
+                      <td className="py-2 pr-2 text-foreground/50 text-xs">{money(item.product.purchasePrice)}</td>
+                      <td className="py-2 pr-2 text-foreground/70 text-sm">{money(effectivePrice(item.product))}</td>
+                      <td className="py-2 pr-2">
+                        <div className="flex items-center gap-1">
+                          <QuantityPopover
+                            product={item.product}
+                            quantity={item.quantity}
+                            onSetQuantity={(q) => setQuantityDirect(item.product.id, q)}
+                          />
                         </div>
                       </td>
-                      <td className="py-2.5 pr-4 text-right text-foreground/70">
-                        {money(effectivePrice(item.product))}
-                        {item.product.discountType && item.product.discountValue > 0 && (
-                          <div className="text-xs text-success">
-                            -{item.product.discountType === "percent" ? `${item.product.discountValue}%` : money(item.product.discountValue)}
-                          </div>
-                        )}
-                      </td>
                       {shop?.gstEnabled && (
-                        <td className="py-2.5 pr-4 text-right text-foreground/50">{item.product.taxRate}%</td>
+                        <td className="py-2 pr-2 text-right text-foreground/50">{item.product.taxRate}%</td>
                       )}
-                      <td className="py-2.5 pr-4 text-right font-medium text-foreground">
+                      <td className="py-2 pr-2 text-right font-medium text-foreground">
                         {money(effectivePrice(item.product) * item.quantity)}
                       </td>
-                      <td className="py-2.5 text-right">
+                      <td className="py-2 text-right">
                         <button
                           type="button"
-                          aria-label={`Remove ${item.product.name}`}
-                          onClick={() => setCart((p) => p.filter((i) => i.product.id !== item.product.id))}
-                          className="text-foreground/40 hover:text-danger"
+                          aria-label={`Remove ${item.product.name} entirely`}
+                          onClick={() => removeFromCart(item.product.id)}
+                          className="text-foreground/40 hover:text-danger transition-colors"
+                          title="Remove item (Del)"
                         >
                           <Trash2 className="h-4 w-4" aria-hidden="true" />
                         </button>
@@ -459,61 +636,28 @@ export default function PosPage() {
         </Card>
 
         {/* Checkout panel */}
-        <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-3 overflow-y-auto">
           {/* Customer */}
-          <Card className="flex flex-col gap-3 p-5">
-            <h2 className="text-base font-semibold text-foreground">Customer</h2>
+          <Card className="flex flex-col gap-3 p-4">
+            <h2 className="text-base font-semibold text-foreground">Customer [F6]</h2>
             <div className="flex items-end gap-2">
               <div className="flex-1">
-                <Field
-                  label="Phone"
-                  value={customerPhone}
-                  onChange={(e) => {
-                    setCustomerPhone(e.target.value);
-                    setCustomer(null);
-                    setPointsRedeemed(0);
-                  }}
-                  placeholder="For loyalty"
-                />
+                <Field label="Phone" value={customerPhone} onChange={(e) => { setCustomerPhone(e.target.value); setCustomer(null); setPointsRedeemed(0); }} placeholder="For loyalty" />
               </div>
               <Button type="button" variant="secondary" onClick={() => lookupCustomer()} aria-label="Find customer">
                 <Search className="h-4 w-4" aria-hidden="true" />
               </Button>
             </div>
-            <Field
-              label="Name (optional)"
-              value={customerName}
-              onChange={(e) => setCustomerName(e.target.value)}
-              placeholder="Walk-in Customer"
-            />
+            <Field label="Name (optional)" value={customerName} onChange={(e) => setCustomerName(e.target.value)} placeholder="Walk-in Customer" />
             {customer && customer.totalDue >= 0.01 && (
               <div className="rounded-lg bg-danger/10 p-3">
                 <p className="text-sm font-medium text-danger">Owes {money(customer.totalDue)} from before</p>
-                <p className="mt-0.5 text-xs text-foreground/60">
-                  Add any amount to this bill to clear it — the customer pays it together with the sale.
-                </p>
+                <p className="mt-0.5 text-xs text-foreground/60">Add any amount to this bill to clear it.</p>
                 <div className="mt-2 flex items-end gap-2">
                   <div className="flex-1">
-                    <Field
-                      label="Clear previous due (adds to bill)"
-                      type="number"
-                      min={0}
-                      max={customer.totalDue}
-                      step="0.01"
-                      value={duePaid}
-                      onChange={(e) =>
-                        setDuePaid(
-                          e.target.value === ""
-                            ? ""
-                            : String(Math.min(Math.max(0, Number(e.target.value) || 0), customer.totalDue))
-                        )
-                      }
-                      placeholder="0.00"
-                    />
+                    <Field label="Clear previous due" type="number" min={0} max={customer.totalDue} step="0.01" value={duePaid} onChange={(e) => setDuePaid(e.target.value === "" ? "" : String(Math.min(Math.max(0, Number(e.target.value) || 0), customer.totalDue)))} placeholder="0.00" />
                   </div>
-                  <Button type="button" variant="secondary" onClick={() => setDuePaid(String(customer.totalDue))}>
-                    Full due
-                  </Button>
+                  <Button type="button" variant="secondary" onClick={() => setDuePaid(String(customer.totalDue))}>Full due</Button>
                 </div>
               </div>
             )}
@@ -533,23 +677,12 @@ export default function PosPage() {
                   <>
                     <div className="mt-2 flex items-end gap-2">
                       <div className="flex-1">
-                        <Field
-                          label={`Redeem points (1 pt = ${money(shop.pointValue).replace(sym + " ", sym)})`}
-                          type="number"
-                          min={0}
-                          max={maxRedeemable}
-                          value={pointsRedeemed || ""}
-                          onChange={(e) => setPointsRedeemed(Math.min(Number(e.target.value) || 0, maxRedeemable))}
-                        />
+                        <Field label={`Redeem points`} type="number" min={0} max={maxRedeemable} value={pointsRedeemed || ""} onChange={(e) => setPointsRedeemed(Math.min(Number(e.target.value) || 0, maxRedeemable))} />
                       </div>
-                      <Button type="button" variant="secondary" onClick={() => setPointsRedeemed(maxRedeemable)}>
-                        Use all
-                      </Button>
+                      <Button type="button" variant="secondary" onClick={() => setPointsRedeemed(maxRedeemable)}>Use all</Button>
                     </div>
                     {pointsRedeemed > 0 && (
-                      <p className="mt-1.5 text-xs text-success">
-                        {pointsRedeemed} pts = {money(pointsRedeemed * shop.pointValue)} off this sale
-                      </p>
+                      <p className="mt-1.5 text-xs text-success">{pointsRedeemed} pts = {money(pointsRedeemed * shop.pointValue)} off this sale</p>
                     )}
                   </>
                 ) : (
@@ -560,204 +693,142 @@ export default function PosPage() {
           </Card>
 
           {/* Returns / exchange */}
-          <Card className="flex flex-col gap-3 p-5">
-            <h2 className="text-base font-semibold text-foreground">Return / Exchange</h2>
-            <ReturnPanel
-              sym={sym}
-              drafted={returnLines}
-              onAdd={(lines) => setReturnLines((prev) => [...prev, ...lines])}
-              onInvoiceFound={onReturnInvoiceFound}
-            />
+          <Card className="flex flex-col gap-3 p-4">
+            <h2 className="text-base font-semibold text-foreground">Return / Exchange [F9]</h2>
+            <ReturnPanel sym={sym} drafted={returnLines} onAdd={(lines) => setReturnLines((prev) => [...prev, ...lines])} onInvoiceFound={onReturnInvoiceFound} />
             {returnLines.length > 0 && (
               <div className="flex flex-col gap-1.5 border-t border-border pt-3">
                 {returnLines.map((l) => (
                   <div key={`${l.invoiceId}:${l.invoiceItemId}`} className="flex items-center justify-between gap-2 text-sm">
-                    <span className="flex-1 truncate text-foreground/80">
-                      {l.quantity}× {l.name}
-                      <span className="ml-1 text-xs text-foreground/40">({l.invoiceNumber})</span>
-                    </span>
+                    <span className="flex-1 truncate text-foreground/80">{l.quantity}\u00d7 {l.name} <span className="text-foreground/40">({l.invoiceNumber})</span></span>
                     <span className="text-foreground">- {money(l.refundAmount)}</span>
-                    <button
-                      type="button"
-                      aria-label={`Remove return of ${l.name}`}
-                      onClick={() => setReturnLines((prev) => prev.filter((x) => !(x.invoiceId === l.invoiceId && x.invoiceItemId === l.invoiceItemId)))}
-                      className="text-foreground/40 hover:text-danger"
-                    >
-                      <Trash2 className="h-4 w-4" aria-hidden="true" />
-                    </button>
+                    <button type="button" aria-label={`Remove return of ${l.name}`} onClick={() => setReturnLines((prev) => prev.filter((x) => !(x.invoiceId === l.invoiceId && x.invoiceItemId === l.invoiceItemId)))} className="text-foreground/40 hover:text-danger"><Trash2 className="h-4 w-4" aria-hidden="true" /></button>
                   </div>
                 ))}
-                <div className="flex items-center justify-between pt-1 text-sm font-medium">
-                  <span className="text-foreground/60">Return total</span>
-                  <span className="text-foreground">- {money(returnTotal)}</span>
-                </div>
-              </div>
-            )}
-            {refundValue > 0 && (
-              <div className="rounded-lg bg-warning/10 p-3">
-                <p className="text-sm font-medium text-warning">Refund due to customer: {money(refundValue)}</p>
-                <p className="mb-2 mt-0.5 text-xs text-foreground/60">The return is worth more than the purchase — settle the difference:</p>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setRefundMode("CASH")}
-                    className={`rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
-                      refundMode === "CASH" ? "border-brand bg-brand text-brand-foreground" : "border-border text-foreground/70 hover:bg-surface-muted"
-                    }`}
-                  >
-                    Cash refund
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!customer}
-                    onClick={() => setRefundMode("CREDIT")}
-                    title={!customer ? "Add a customer to store credit" : undefined}
-                    className={`rounded-lg border px-3 py-2 text-sm font-medium transition-colors disabled:opacity-50 ${
-                      refundMode === "CREDIT" ? "border-brand bg-brand text-brand-foreground" : "border-border text-foreground/70 hover:bg-surface-muted"
-                    }`}
-                  >
-                    Store credit
-                  </button>
-                </div>
               </div>
             )}
           </Card>
 
           {/* Discount + payment */}
-          <Card className="flex flex-col gap-3 p-5">
-            <h2 className="text-base font-semibold text-foreground">Discount</h2>
+          <Card className="flex flex-col gap-3 p-4">
+            <h2 className="text-base font-semibold text-foreground">Discount [F7]</h2>
             <div className="flex gap-2">
-              <select
-                aria-label="Discount type"
-                value={discountType ?? ""}
-                onChange={(e) => setDiscountType((e.target.value || null) as "percent" | "amount" | null)}
-                className="rounded-lg border border-border bg-surface px-3 py-2.5 text-sm text-foreground"
-              >
+              <select aria-label="Discount type" value={discountType ?? ""} onChange={(e) => setDiscountType((e.target.value || null) as "percent" | "amount" | null)} className="rounded-lg border border-border bg-surface px-3 py-2.5 text-sm text-foreground">
                 <option value="">None</option>
                 <option value="percent">%</option>
                 <option value="amount">{sym}</option>
               </select>
-              <input
-                type="number"
-                min={0}
-                step="0.01"
-                disabled={!discountType}
-                value={discountValue || ""}
-                onChange={(e) => setDiscountValue(Number(e.target.value) || 0)}
-                placeholder="Discount value"
-                aria-label="Discount value"
-                className="w-full rounded-lg border border-border bg-surface px-3 py-2.5 text-sm text-foreground disabled:opacity-50"
-              />
+              <input type="number" min={0} step="0.01" disabled={!discountType} value={discountValue || ""} onChange={(e) => setDiscountValue(Number(e.target.value) || 0)} placeholder="Discount value" aria-label="Discount value" className="w-full rounded-lg border border-border bg-surface px-3 py-2.5 text-sm text-foreground disabled:opacity-50" />
             </div>
 
             <h2 className="mt-2 text-base font-semibold text-foreground">Payment</h2>
-            <div className="grid grid-cols-3 gap-2">
-              {(["CASH", "UPI", "CARD"] as PaymentMethod[]).map((m) => (
-                <button
-                  key={m}
-                  type="button"
-                  onClick={() => setPaymentMethod(m)}
-                  className={`rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
-                    paymentMethod === m
-                      ? "border-brand bg-brand text-brand-foreground"
-                      : "border-border text-foreground/70 hover:bg-surface-muted"
-                  }`}
-                >
-                  {m}
-                </button>
+            <div className="flex flex-col gap-2">
+              {payments.map((line, idx) => (
+                <div key={idx} className="flex items-end gap-2">
+                  <div className="w-28">
+                    <label className="text-[11px] font-medium text-text-secondary mb-0.5 block">Method</label>
+                    <select
+                      value={line.method}
+                      onChange={(e) => setPayments((prev) => prev.map((p, i) => i === idx ? { ...p, method: e.target.value as PaymentMethod } : p))}
+                      className="h-9 w-full rounded border border-border bg-surface-muted px-2 text-[12px] font-medium text-foreground focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand/20"
+                    >
+                      <option value="CASH">Cash</option>
+                      <option value="UPI">UPI</option>
+                      <option value="CARD">Card</option>
+                    </select>
+                  </div>
+                  <div className="flex-1">
+                    <label className="text-[11px] font-medium text-text-secondary mb-0.5 block">Amount</label>
+                    <input
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      value={line.amount || ""}
+                      onChange={(e) => setPayments((prev) => prev.map((p, i) => i === idx ? { ...p, amount: Number(e.target.value) || 0 } : p))}
+                      placeholder="0.00"
+                      className="h-9 w-full rounded border border-border bg-surface-muted px-2 text-[12px] text-foreground focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand/20"
+                    />
+                  </div>
+                  {payments.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => setPayments((prev) => prev.filter((_, i) => i !== idx))}
+                      className="flex h-9 w-9 shrink-0 items-center justify-center rounded text-text-tertiary hover:bg-danger/10 hover:text-danger transition-colors"
+                      title="Remove payment"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
               ))}
             </div>
-            {paymentMethod === "CASH" && (
-              <div className="flex items-end gap-2">
-                <div className="flex-1">
-                  <Field
-                    label="Amount received"
-                    type="number"
-                    min={0}
-                    step="0.01"
-                    value={amountPaid}
-                    onChange={(e) => setAmountPaid(e.target.value)}
-                  />
-                </div>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  className="whitespace-nowrap"
-                  onClick={() => setAmountPaid(String(collectTotal))}
-                  disabled={collectTotal === 0}
-                >
-                  Paid in full
-                </Button>
-              </div>
+            <div className="flex items-center gap-2 mt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  const remaining = round2(collectTotal - payments.reduce((s, p) => s + p.amount, 0));
+                  const nextMethod: PaymentMethod = payments.length > 0 && payments[payments.length - 1].method === "CASH" ? "UPI" : "CASH";
+                  setPayments((prev) => [...prev, { method: nextMethod, amount: remaining > 0 ? remaining : 0 }]);
+                }}
+                disabled={remainingToPay <= 0}
+                className="flex items-center gap-1 rounded border border-dashed border-border px-2 py-1 text-[11px] font-medium text-text-secondary hover:border-brand hover:text-brand transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <Plus className="h-3 w-3" />
+                Split payment
+              </button>
+              {payments.length > 1 && (
+                <span className="text-[11px] text-text-tertiary">
+                  Total: {money(totalTendered)} / {money(collectTotal)}
+                </span>
+              )}
+            </div>
+            {remainingToPay > 0 && totalTendered > 0 && (
+              <p className="rounded bg-warning/10 px-2 py-1.5 text-[11px] font-medium text-warning">
+                Remaining: {money(remainingToPay)} to collect
+              </p>
+            )}
+            {changeDue > 0 && (
+              <p className="rounded bg-success/10 px-2 py-1.5 text-[11px] font-semibold text-success">
+                Return {money(changeDue)} change to customer
+              </p>
             )}
           </Card>
 
           {/* Totals */}
-          <Card className="flex flex-col gap-2 p-5">
+          <Card className="flex flex-col gap-2 p-4">
             {(() => {
-              const adjusted = returnTotal > 0 || creditUse > 0 || dueToClear > 0;
+              const adjusted = returnTotal > 0 || creditUse > 0 || dueToClear > 0 || (discountType && discountValue > 0);
               return (
                 <>
                   <Row label={adjusted ? "This sale" : "Subtotal"} value={money(adjusted ? quote.total : quote.subtotal)} />
-                  {!adjusted && quote.discountAmount > 0 && <Row label="Discount" value={`- ${money(quote.discountAmount)}`} />}
+                  {quote.discountAmount > 0 && <Row label="Discount" value={`- ${money(quote.discountAmount)}`} />}
                   {!adjusted && shop?.gstEnabled && quote.taxAmount > 0 && <Row label="GST (included)" value={money(quote.taxAmount)} />}
                   {!adjusted && quote.loyaltyDiscount > 0 && <Row label="Loyalty" value={`- ${money(quote.loyaltyDiscount)}`} />}
                   {returnTotal > 0 && <Row label="Returns" value={`- ${money(returnTotal)}`} />}
                   {creditUse > 0 && <Row label="Store credit used" value={`- ${money(creditUse)}`} />}
-                  {/* Show what will ACTUALLY clear given the tender so far
-                      (duePaidFinal), not the intended amount (dueToClear) —
-                      on a cash bill that's still short, the due hasn't been
-                      funded yet, and claiming it's cleared here is exactly
-                      what made cashiers think a due had been paid when the
-                      backend correctly left it standing. */}
                   {dueToClear > 0 && (
-                    <Row
-                      label={duePaidFinal < dueToClear ? "Due to clear (needs full payment)" : "Previous due cleared"}
-                      value={money(duePaidFinal)}
-                    />
+                    <Row label={duePaidFinal < dueToClear ? "Due to clear (needs full payment)" : "Previous due cleared"} value={money(duePaidFinal)} />
                   )}
                 </>
               );
             })()}
             <div className="my-1 border-t border-border" />
             {refundValue > 0 ? (
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between rounded-xl bg-warning-light px-4 py-3 -mx-1">
                 <span className="text-sm font-semibold text-warning">Refund ({refundMode === "CREDIT" ? "store credit" : "cash"})</span>
-                <span className="text-xl font-semibold text-warning">{money(refundValue)}</span>
+                <span className="text-2xl font-bold text-warning">{money(refundValue)}</span>
               </div>
             ) : (
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-semibold text-foreground/70">
-                  {returnTotal > 0 || creditUse > 0 || dueToClear > 0 ? "To Collect" : "Grand Total"}
-                </span>
-                <span className="text-xl font-semibold text-foreground">{money(collectTotal)}</span>
+              <div className="flex items-center justify-between rounded-xl border border-brand/20 bg-brand-light px-4 py-3 -mx-1">
+                <span className="text-sm font-semibold text-brand">{returnTotal > 0 || creditUse > 0 || dueToClear > 0 ? "To Collect" : "Grand Total"}</span>
+                <span className="text-2xl font-bold text-brand">{money(collectTotal)}</span>
               </div>
             )}
-            {paymentMethod === "CASH" && Number(amountPaid) > 0 && changeDue > 0 && (
-              <Row label="Change" value={money(changeDue)} />
-            )}
-            {shortNow > 0 && (
-              <p className={`rounded-lg px-3 py-2 text-xs font-medium ${customer ? "bg-warning/10 text-warning" : "bg-danger/10 text-danger"}`}>
-                {customer
-                  ? `${money(shortNow)} short — the unpaid part stays on ${customer.name}'s due balance`
-                  : `${money(shortNow)} short — add a customer (phone) to record this as a due, or collect the full amount`}
-              </p>
-            )}
-            {shop?.loyaltyEnabled && customer && quote.pointsEarned > 0 && (
-              <p className="text-xs text-foreground/50">Earns {quote.pointsEarned} points</p>
-            )}
-            <Button
-              onClick={finalizeSale}
-              disabled={!canFinalize || isCheckingOut}
-              className="mt-2 w-full"
-            >
-              {isCheckingOut
-                ? "Processing…"
-                : refundValue > 0 && cart.length === 0
-                  ? "Process Return (Enter)"
-                  : cart.length === 0 && returnLines.length === 0 && dueToClear > 0
-                    ? "Collect Due (Enter)"
-                    : "Finalize Sale (Enter)"}
+            {changeDue > 0 && (<Row label="Change" value={money(changeDue)} />)}
+            {shortNow > 0 && (<p className={`rounded-lg px-3 py-2 text-xs font-medium ${customer ? "bg-warning/10 text-warning" : "bg-danger/10 text-danger"}`}>{customer ? `${money(shortNow)} short \u2014 unpaid part stays on ${customer.name}'s due` : `${money(shortNow)} short \u2014 add a customer to record as due`}</p>)}
+            {shop?.loyaltyEnabled && customer && quote.pointsEarned > 0 && (<p className="text-xs text-foreground/50">Earns {quote.pointsEarned} points</p>)}
+            <Button onClick={finalizeSale} disabled={!canFinalize || isCheckingOut} className="mt-2 w-full" size="lg">
+              {isCheckingOut ? "Processing…" : "END SALE [F12]"}
             </Button>
           </Card>
         </div>

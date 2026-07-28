@@ -128,11 +128,14 @@ function buildReceiptPdf({ shop, invoice }) {
     doc.font('Helvetica').fontSize(8);
     rule(doc, { dashed: true });
 
-    for (const it of invoice.items) {
-      y = doc.y;
-      const base = it.price * it.quantity;
-      doc.text(it.name, doc.page.margins.left, y, { width: colName });
-      const rowHeight = doc.heightOfString(it.name, { width: colName });
+  for (const it of invoice.items) {
+    y = doc.y;
+    const base = it.price * it.quantity;
+    const nameText = shop.showHsnOnPdf && it.hsn
+      ? `${it.name} (HSN:${it.hsn})`
+      : it.name;
+    doc.text(nameText, doc.page.margins.left, y, { width: colName });
+    const rowHeight = doc.heightOfString(nameText, { width: colName });
       doc.text(it.unit ? `${it.quantity} ${it.unit}` : String(it.quantity), doc.page.margins.left + colName, y, {
         width: colQty - GAP,
         align: 'right',
