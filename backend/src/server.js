@@ -19,6 +19,7 @@ const billsRoutes = require('./routes/bills');
 const backupRoutes = require('./routes/backup');
 const accountingRoutes = require('./routes/accounting');
 const migrateRoutes = require('./routes/migrate');
+const supplierRoutes = require('./routes/suppliers');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -57,6 +58,7 @@ app.use('/api/bills', billsRoutes);
 app.use('/api/backup', backupRoutes);
 app.use('/api/accounting', accountingRoutes);
 app.use('/api/migrate', migrateRoutes);
+app.use('/api/suppliers', supplierRoutes);
 
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 

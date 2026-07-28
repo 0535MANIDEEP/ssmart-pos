@@ -87,6 +87,109 @@ model Product {
   updatedAt     DateTime      @updatedAt
   invoiceItems  InvoiceItem[]
   returnItems   ReturnItem[]
+  purchaseItems PurchaseItem[]
+  // BOM / Packing fields
+  isBulk        Boolean       @default(false) // true = sold in bulk (e.g. 50kg bag), not directly at POS
+  packSize      Float?        // if packed product: how many units in this pack (e.g. 1 for 1kg, 5 for 5kg)
+  bulkProductId Int?          // if packed product: links to the bulk parent product
+  bulkProduct   Product?      @relation("BulkToPack", fields: [bulkProductId], references: [id])
+  packedItems   Product[]     @relation("BulkToPack")
+  // BOM relations
+  outputBoms    BillOfMaterial[] // BOMs that produce this product
+  bomItems      BomItem[]        // BOMs that consume this product as ingredient
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SUPPLIER & PURCHASE MODULE
+// ═══════════════════════════════════════════════════════════════════════
+
+model Supplier {
+  id             Int              @id @default(autoincrement())
+  name           String
+  gstin          String?
+  phone          String?
+  email          String?
+  address1       String?
+  address2       String?
+  city           String?
+  state          String?
+  pincode        String?
+  contactPerson  String?
+  paymentTerms   String?          // e.g. "Net 30", "Cash", "Credit 15 days"
+  outstandingBalance Float        @default(0) // amount owed to supplier
+  isActive       Boolean          @default(true)
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  purchaseInvoices PurchaseInvoice[]
+  @@unique([name])
+}
+
+model PurchaseInvoice {
+  id               Int             @id @default(autoincrement())
+  supplierId       Int
+  supplier         Supplier        @relation(fields: [supplierId], references: [id])
+  invoiceNumber    String          // supplier's invoice number (not unique — same supplier may reuse)
+  date             DateTime
+  dueDate          DateTime?
+  subtotal         Float           @default(0) // sum of line bases before tax
+  discountAmount   Float           @default(0)
+  taxAmount        Float           @default(0) // total GST on purchase
+  totalAmount      Float           @default(0) // final payable to supplier
+  amountPaid       Float           @default(0) // how much paid already
+  status           String          @default("pending") // "pending" | "partial" | "paid" | "returned"
+  paymentMethod    String?         // "CASH" | "UPI" | "CARD" | "BANK_TRANSFER" | "CREDIT"
+  notes            String?
+  createdBy        Int
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+  items            PurchaseItem[]
+  @@index([date])
+  @@index([supplierId])
+  @@unique([supplierId, invoiceNumber])
+}
+
+model PurchaseItem {
+  id                Int             @id @default(autoincrement())
+  purchaseInvoiceId Int
+  purchaseInvoice   PurchaseInvoice @relation(fields: [purchaseInvoiceId], references: [id], onDelete: Cascade)
+  productId         Int
+  product           Product         @relation(fields: [productId], references: [id])
+  name              String          // snapshot
+  quantity          Int
+  unitCost          Float           // cost per unit (excl. tax)
+  taxRate           Float           @default(0)
+  taxAmount         Float           @default(0)
+  total             Float           @default(0) // line total incl. tax
+  batchNumber       String?
+  expiryDate        DateTime?
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// BILL OF MATERIALS (BOM) — for packing / repacking
+// ═══════════════════════════════════════════════════════════════════════
+
+model BillOfMaterial {
+  id              Int      @id @default(autoincrement())
+  name            String   // e.g. "Rice 1kg Pack", "Sugar 5kg Pack"
+  description     String?
+  outputProductId Int      // the packed product this BOM produces
+  outputProduct   Product  @relation(fields: [outputProductId], references: [id])
+  outputQuantity  Int      @default(1) // how many packs produced per batch
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  items           BomItem[]
+  @@unique([name])
+}
+
+model BomItem {
+  id            Int             @id @default(autoincrement())
+  bomId         Int
+  bom           BillOfMaterial  @relation(fields: [bomId], references: [id], onDelete: Cascade)
+  productId     Int             // the bulk/raw ingredient
+  product       Product         @relation(fields: [productId], references: [id])
+  quantity      Float           // how much of this ingredient is consumed per batch
+  unit          String?         // "KGS", "LITRES", "PCS"
 }
 
 model Customer {

@@ -11,6 +11,9 @@ const ROUTE_LABELS: Record<string, string> = {
   pos: "POS",
   inventory: "Products",
   customers: "Customers",
+  suppliers: "Suppliers",
+  purchases: "Purchase Bills",
+  bom: "BOM / Packing",
   sales: "Invoices",
   settings: "Settings",
   accounting: "Accounting",
@@ -40,9 +43,6 @@ interface BreadcrumbItem {
 export function generateBreadcrumbs(pathname: string): BreadcrumbItem[] {
   const segments = pathname.split("/").filter(Boolean);
   const items: BreadcrumbItem[] = [];
-
-  // Skip POS routes (full-screen, no breadcrumbs)
-  if (segments[0] === "pos") return [];
 
   let path = "";
   for (let i = 0; i < segments.length; i++) {
@@ -108,9 +108,6 @@ export function BackButton({ className }: BackButtonProps) {
 
   // Don't show back button on dashboard or root
   if (segments.length <= 1) return null;
-
-  // Don't show on POS (full-screen)
-  if (segments[0] === "pos") return null;
 
   const parentPath = `/${segments.slice(0, -1).join("/")}` || "/dashboard";
 

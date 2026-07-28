@@ -54,6 +54,10 @@ export function ProductModal({ mode, product, initialBarcode, onClose }: Product
   const createProduct = useCreateProduct();
   const updateProduct = useUpdateProduct();
 
+  const [isBulk, setIsBulk] = useState(product?.isBulk ?? false);
+  const [packSize, setPackSize] = useState(product?.packSize ?? "");
+  const [bulkProductId, setBulkProductId] = useState(product?.bulkProductId ?? "");
+
   const {
     register,
     handleSubmit,
@@ -87,11 +91,17 @@ export function ProductModal({ mode, product, initialBarcode, onClose }: Product
 
   async function onSubmit(values: ProductForm) {
     try {
+      const payload = {
+        ...values,
+        isBulk,
+        packSize: packSize ? Number(packSize) : null,
+        bulkProductId: bulkProductId ? Number(bulkProductId) : null,
+      };
       if (mode === "edit" && product) {
-        await updateProduct.mutateAsync({ id: product.id, data: values });
+        await updateProduct.mutateAsync({ id: product.id, data: payload });
         show("Product updated", "success");
       } else {
-        await createProduct.mutateAsync(values);
+        await createProduct.mutateAsync(payload);
         show("Product added", "success");
       }
       onClose();
@@ -291,6 +301,43 @@ export function ProductModal({ mode, product, initialBarcode, onClose }: Product
                   {rate}%
                 </button>
               ))}
+            </div>
+          )}
+
+          {/* Bulk / Packing section */}
+          <div className="rounded-lg border border-border p-3">
+            <label className="flex items-center gap-2 text-sm font-medium text-foreground">
+              <input type="checkbox" checked={isBulk} onChange={(e) => setIsBulk(e.target.checked)} className="rounded" />
+              This is a bulk product (sold in large quantities, not directly at POS)
+            </label>
+          </div>
+          {!isBulk && (
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="text-[13px] font-medium text-foreground mb-1 block">Pack Size (units per pack)</label>
+                <input
+                  type="number"
+                  min={0}
+                  step={0.01}
+                  value={packSize}
+                  onChange={(e) => setPackSize(e.target.value)}
+                  placeholder="e.g. 1 for 1kg, 5 for 5kg"
+                  className="h-9 w-full rounded-md border border-border bg-surface px-3 text-[13px] text-foreground"
+                />
+              </div>
+              <div>
+                <label className="text-[13px] font-medium text-foreground mb-1 block">Source Bulk Product</label>
+                <select
+                  value={bulkProductId}
+                  onChange={(e) => setBulkProductId(e.target.value)}
+                  className="h-9 w-full rounded-md border border-border bg-surface px-3 text-[13px] text-foreground"
+                >
+                  <option value="">None (standalone)</option>
+                  {products?.filter((p) => p.isBulk).map((p) => (
+                    <option key={p.id} value={p.id}>{p.name} (bulk)</option>
+                  ))}
+                </select>
+              </div>
             </div>
           )}
 

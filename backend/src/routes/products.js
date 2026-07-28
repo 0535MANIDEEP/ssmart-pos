@@ -21,12 +21,12 @@ const fields = {
   purchasePrice: z.number().min(0),
   sellingPrice: z.number().min(0),
   taxRate: z.number().min(0).max(100),
-  // A standing per-product discount — either a percent (capped at 100) or a
-  // flat currency amount (capped against sellingPrice, checked in the
-  // route below since that needs both fields together, not just one).
   discountType: z.enum(['percent', 'amount']).nullish(),
   discountValue: z.number().min(0),
   stock: z.number().int().min(0),
+  isBulk: z.boolean().optional().default(false),
+  packSize: z.number().min(0).nullish(),
+  bulkProductId: z.number().nullish(),
 };
 const createSchema = z.object({
   ...fields,

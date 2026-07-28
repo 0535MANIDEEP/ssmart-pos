@@ -299,10 +299,22 @@ router.post('/', async (req, res) => {
       }
 
       for (const item of body.items) {
-        await tx.product.update({
-          where: { id: item.productId },
-          data: { stock: { decrement: item.quantity } },
-        });
+        // Check if this is a packed product linked to a bulk parent
+        const product = await tx.product.findUnique({ where: { id: item.productId } });
+        if (product && product.bulkProductId && product.packSize && product.packSize > 0) {
+          // Deduct from bulk product: quantity sold / packSize
+          const bulkDeduction = item.quantity / product.packSize;
+          await tx.product.update({
+            where: { id: product.bulkProductId },
+            data: { stock: { decrement: Math.ceil(bulkDeduction) } },
+          });
+        } else {
+          // Normal product — deduct directly
+          await tx.product.update({
+            where: { id: item.productId },
+            data: { stock: { decrement: item.quantity } },
+          });
+        }
       }
 
       if (customer) {

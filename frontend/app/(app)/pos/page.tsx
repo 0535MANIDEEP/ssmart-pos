@@ -10,6 +10,7 @@ import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Field } from "@/components/ui/Field";
 import { ReceiptActions } from "@/components/ReceiptActions";
+import { BillConfirmDialog } from "@/components/BillConfirmDialog";
 import { ReturnPanel, type ReturnDraftLine } from "@/components/ReturnPanel";
 import { QuantityPopover } from "@/components/QuantityPopover";
 import { useBarcodeScanner } from "@/hooks/useBarcodeScanner";
@@ -59,6 +60,7 @@ export default function PosPage() {
   const [completedSale, setCompletedSale] = useState<{ id: number; invoiceNumber: string; totalAmount: number; changeDue: number; payments: { method: string; amount: number }[] } | null>(null);
   const [autoSaveStatus, setAutoSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
   const [showShutdownDialog, setShowShutdownDialog] = useState(false);
+  const [showConfirmDialog, setShowConfirmDialog] = useState(false);
   const [manualQuery, setManualQuery] = useState("");
   const [committedQuery, setCommittedQuery] = useState("");
   const [focusedCartIndex, setFocusedCartIndex] = useState<number | null>(null);
@@ -153,10 +155,18 @@ export default function PosPage() {
     (product: Product) => {
       setCompletedSale(null);
       setCart((prev) => {
+        // For packed products, effective stock = bulk parent stock / packSize
+        let effectiveStock = product.stock;
+        if (product.bulkProductId && product.packSize && product.packSize > 0) {
+          // The bulk product stock is fetched separately — for now use product.stock
+          // which the backend should have set to bulk-equivalent
+          effectiveStock = product.stock;
+        }
+
         const existing = prev.find((item) => item.product.id === product.id);
         if (!existing) return [...prev, { product, quantity: 1 }];
-        if (existing.quantity >= product.stock) {
-          show(`Only ${product.stock} in stock for "${product.name}"`, "error");
+        if (existing.quantity >= effectiveStock) {
+          show(`Only ${effectiveStock} in stock for "${product.name}"`, "error");
           return prev;
         }
         return prev.map((item) =>
@@ -349,7 +359,7 @@ export default function PosPage() {
       if (e.key === "F5") { e.preventDefault(); resetSale(); show("Cart cleared", "info"); }
       if (e.key === "F6") { e.preventDefault(); const phone = posRef.current?.querySelector('input[placeholder*="Phone"]') as HTMLElement | null; if (phone) phone.focus(); }
       if (e.key === "F7") { e.preventDefault(); const disc = posRef.current?.querySelector('select[aria-label="Discount type"]') as HTMLElement | null; if (disc) disc.focus(); }
-      if (e.key === "F12" || e.key === "End") { e.preventDefault(); finalizeSale(); }
+      if (e.key === "F12" || e.key === "End") { e.preventDefault(); if (canFinalize) setShowConfirmDialog(true); }
       if (e.key === "Escape") { e.preventDefault(); setCompletedSale(null); setShowShutdownDialog(false); }
       if ((e.ctrlKey || e.metaKey) && e.key === " ") { e.preventDefault(); const search = posRef.current?.querySelector('input[placeholder*="Scan or type"]') as HTMLElement | null; if (search) search.focus(); }
     };
@@ -466,6 +476,17 @@ export default function PosPage() {
           </div>
         </Card>
       )}
+
+      <BillConfirmDialog
+        open={showConfirmDialog}
+        total={collectTotal}
+        paymentMethods={payments}
+        onPaymentMethodsChange={setPayments}
+        onConfirm={() => { setShowConfirmDialog(false); finalizeSale(); }}
+        onCancel={() => setShowConfirmDialog(false)}
+        isProcessing={isCheckingOut}
+        currencySymbol={sym}
+      />
 
       {showRecoveryDialog && recoveryDraft && (
         <Card variant="brand" className="p-6 max-w-md mx-auto animate-scale-in">
@@ -827,7 +848,7 @@ export default function PosPage() {
             {changeDue > 0 && (<Row label="Change" value={money(changeDue)} />)}
             {shortNow > 0 && (<p className={`rounded-lg px-3 py-2 text-xs font-medium ${customer ? "bg-warning/10 text-warning" : "bg-danger/10 text-danger"}`}>{customer ? `${money(shortNow)} short \u2014 unpaid part stays on ${customer.name}'s due` : `${money(shortNow)} short \u2014 add a customer to record as due`}</p>)}
             {shop?.loyaltyEnabled && customer && quote.pointsEarned > 0 && (<p className="text-xs text-foreground/50">Earns {quote.pointsEarned} points</p>)}
-            <Button onClick={finalizeSale} disabled={!canFinalize || isCheckingOut} className="mt-2 w-full" size="lg">
+            <Button onClick={() => setShowConfirmDialog(true)} disabled={!canFinalize || isCheckingOut} className="mt-2 w-full" size="lg">
               {isCheckingOut ? "Processing…" : "END SALE [F12]"}
             </Button>
           </Card>

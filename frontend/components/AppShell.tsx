@@ -20,6 +20,8 @@ import {
   Bell,
   ChevronLeft,
   Calendar,
+  Building2,
+  Factory,
 } from "lucide-react";
 import { clsx } from "clsx";
 import { api } from "@/lib/api";
@@ -43,6 +45,9 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/pos", label: "POS", icon: ScanBarcode, permission: "invoices:create" },
   { href: "/inventory", label: "Products", icon: Package, permission: "products:read" },
   { href: "/customers", label: "Customers", icon: Users, permission: "customers:read" },
+  { href: "/suppliers", label: "Suppliers", icon: Building2, permission: "suppliers:read" },
+  { href: "/purchases", label: "Purchases", icon: ReceiptText, permission: "purchases:read" },
+  { href: "/bom", label: "BOM / Packing", icon: Factory, permission: "products:read" },
   { href: "/sales", label: "Invoices", icon: ReceiptText, permission: "invoices:read" },
   { href: "/settings", label: "Settings", icon: Settings, permission: "settings:write" },
 ];
