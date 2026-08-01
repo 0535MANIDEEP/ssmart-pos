@@ -2,59 +2,23 @@
   "name": "ssmart-pos",
   "version": "1.0.0",
   "description": "SS Mart — Offline-first POS and inventory management",
-  "main": "electron/main.js",
   "author": "Manideep Daram",
   "license": "MIT",
-  "type": "commonjs",
   "scripts": {
-    "electron:dev": "cross-env NODE_ENV=development electron .",
-    "electron:build": "npm run build:all && electron-builder --win",
-    "electron:build:win": "electron-builder --win",
-    "electron:build:mac": "electron-builder --mac",
-    "electron:build:linux": "electron-builder --linux",
+    "dev": "concurrently \"cd backend && node src/server.js\" \"cd frontend && npx next dev -p 1994\"",
+    "start": "concurrently \"cd backend && node src/server.js\" \"cd frontend && npx next start -p 1994\"",
+    "build:backend": "cd backend && npm install && npx prisma generate",
+    "build:frontend": "cd frontend && npm install && npx next build",
+    "build:all": "npm run build:backend && npm run build:frontend",
     "tauri:dev": "cargo tauri dev",
     "tauri:build": "cargo tauri build",
     "tauri:build:win": "cargo tauri build --target x86_64-pc-windows-msvc",
     "tauri:build:mac": "cargo tauri build --target universal-apple-darwin",
     "tauri:build:linux": "cargo tauri build --target x86_64-unknown-linux-gnu",
-    "cap:init": "cd frontend && npx cap init \"SS Mart\" com.ssmart.pos --web-dir .next",
-    "cap:add:android": "cd frontend && npx cap add android",
-    "cap:add:ios": "cd frontend && npx cap add ios",
-    "cap:sync": "cd frontend && npx cap sync",
-    "cap:build:android": "cd frontend && npx cap build android",
-    "cap:build:ios": "cd frontend && npx cap build ios",
-    "build:backend": "cd backend && npm install && npx prisma generate",
-    "build:frontend": "cd frontend && npm install && npx next build",
-    "build:all": "npm run build:backend && npm run build:frontend",
-    "build:all-platforms": "scripts\\build-all-platforms.bat",
-    "build:all-platforms:sh": "bash scripts/build-all-platforms.sh",
-    "start": "electron .",
+    "build:desktop": "scripts\\build-desktop.bat",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
-    "cross-env": "^7.0.3"
-  },
-  "devDependencies": {
-    "electron": "^43.2.0",
-    "electron-builder": "^26.15.3"
-  },
-  "build": {
-    "appId": "com.ssmart.pos",
-    "productName": "SS Mart",
-    "directories": {
-      "output": "dist-electron"
-    },
-    "win": {
-      "target": "nsis",
-      "icon": "build-resources/icon.ico"
-    },
-    "nsis": {
-      "oneClick": false,
-      "perMachine": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "SS Mart POS"
-    }
+    "concurrently": "^9.0.0"
   }
 }

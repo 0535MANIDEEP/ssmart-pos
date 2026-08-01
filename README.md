@@ -1,17 +1,16 @@
-# nodedr-pos
+# SS Mart POS
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Docker Compose](https://img.shields.io/badge/deploy-docker%20compose-2496ED?logo=docker&logoColor=white)](docker-compose.yml)
-[![Node](https://img.shields.io/badge/node-24-339933?logo=node.js&logoColor=white)](backend/Dockerfile)
+[![Node](https://img.shields.io/badge/node-24-339933?logo=node.js&logoColor=white)](#)
 [![Offline-first](https://img.shields.io/badge/offline--first-yes-success)](#)
+[![Desktop](https://img.shields.io/badge/desktop-tauri-24C8DB?logo=tauri&logoColor=white)](#)
 
 A free, open-source, **offline-first** Point of Sale and inventory
-management system for small retail shops. It runs entirely via Docker
-Compose, so by default it lives on a machine in the shop — no internet
-connection required, no subscription, no data ever leaving the premises.
-It's also just a portable two-container stack, so if you'd rather manage
-it remotely, the identical setup runs on any VPS/cloud provider too — see
-[Where to run it](#where-to-run-it) for the trade-offs either way.
+management system for small retail shops. Runs entirely on your local
+machine — no internet required, no subscription, no data leaving the premises.
+
+**Desktop app** (Tauri): 5-10MB native installer for Windows, macOS, Linux.
+**Web app**: Access via browser at `http://localhost:1994`.
 
 Built for a barcode-scanner counter setup: scan an item to sell it, press
 Enter to check out, then print or download the receipt with one click. No

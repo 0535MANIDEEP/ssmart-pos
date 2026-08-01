@@ -8,18 +8,12 @@ node_modules/
 out/
 build/
 dist/
-dist-electron/
 
 # Tauri
 src-tauri/target/
 src-tauri/icons/*.png
 src-tauri/icons/*.ico
 src-tauri/icons/*.icns
-
-# Capacitor
-frontend/android/
-frontend/ios/
-frontend/.capacitor/
 
 # Environment
 .env
