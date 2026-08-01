@@ -24,6 +24,7 @@ VIAddVersionKey "FileVersion" "1.0.0"
 ; ─── Pages ────────────────────────────────────────────────────────────────────
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "LICENSE"
+!insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
@@ -33,8 +34,8 @@ VIAddVersionKey "FileVersion" "1.0.0"
 
 !insertmacro MUI_LANGUAGE "English"
 
-; ─── Installer Section ────────────────────────────────────────────────────────
-Section "SS Mart POS" SecMain
+; ─── Installer Sections ──────────────────────────────────────────────────────
+Section "SS Mart POS (required)" SecMain
     SectionIn RO
 
     SetOutPath "$INSTDIR"
@@ -92,11 +93,27 @@ Section "SS Mart POS" SecMain
         "NoRepair" 1
 SectionEnd
 
+Section "Start with Windows (recommended)" SecAutoStart
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" \
+        "SSMartPOS" '"$INSTDIR\SSMartPos.exe" --minimized'
+SectionEnd
+
+; ─── Section Descriptions ────────────────────────────────────────────────────
+!insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
+    !insertmacro MUI_DESCRIPTION_TEXT ${SecMain} \
+        "SS Mart POS application files (required)."
+    !insertmacro MUI_DESCRIPTION_TEXT ${SecAutoStart} \
+        "Automatically start SS Mart POS when Windows starts. Recommended for shop computers."
+!insertmacro MUI_FUNCTION_DESCRIPTION_END
+
 ; ─── Uninstaller ─────────────────────────────────────────────────────────────
 Section "Uninstall"
     ; Kill running processes
     nsExec::ExecToLog 'taskkill /F /IM SSMartPos.exe /T 2>nul'
     nsExec::ExecToLog 'taskkill /F /IM node.exe /T 2>nul'
+
+    ; Remove auto-start registry
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "SSMartPOS"
 
     ; Remove files
     RMDir /r "$INSTDIR"
