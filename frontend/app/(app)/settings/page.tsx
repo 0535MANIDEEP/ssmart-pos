@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Search } from "lucide-react";
+import { Search, Download } from "lucide-react";
 import { Card } from "@/components/ui/Card";
 import { Field } from "@/components/ui/Field";
 import { Select } from "@/components/ui/Select";
@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/Button";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { useToast } from "@/components/Toast";
 import { useCurrencies, useShopSettings, useUpdateSettings } from "@/hooks/useShopSettings";
-import { api, ApiError } from "@/lib/api";
+import { api, ApiError, describeApiError } from "@/lib/api";
 import { gstStateFromGstin, isValidGstinFormat, isValidPanFormat } from "@/lib/masters";
 import type { PinCodeRecord } from "@/hooks/useMasters";
 import type { ShopSettings } from "@/lib/types";
@@ -33,15 +33,15 @@ export default function SettingsPage() {
     <div className="flex flex-col gap-6">
       <h1 className="text-2xl font-semibold text-foreground">Settings</h1>
 
-      <div className="flex flex-wrap gap-1 border-b border-border">
+      <div className="flex flex-wrap gap-1 rounded-xl bg-surface-muted p-1.5">
         {TABS.map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={`border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
+            className={`rounded-lg px-4 py-2 text-sm font-medium transition-all duration-150 ${
               tab === t
-                ? "border-brand text-brand"
-                : "border-transparent text-foreground/60 hover:text-foreground"
+                ? "bg-brand text-white shadow-sm shadow-brand/20"
+                : "text-text-secondary hover:text-foreground hover:bg-surface"
             }`}
           >
             {t}
@@ -480,9 +480,9 @@ function BackupTab() {
   async function triggerBackup() {
     setBusy(true);
     try {
-      const result = await api.post<{ dest: string }>("/backup");
+      const result = await api.post<{ ok: boolean; path: string }>("/backup/run");
       show("Backup completed successfully", "success");
-      setLastBackup(result.dest);
+      setLastBackup(result.path);
     } catch (err) {
       show(err instanceof ApiError ? err.message : "Backup failed", "error");
     } finally {
@@ -492,16 +492,37 @@ function BackupTab() {
 
   return (
     <Card className="max-w-2xl p-6">
-      <h2 className="mb-2 text-base font-semibold text-foreground">Database Backup</h2>
+      <div className="flex items-center gap-3 mb-4">
+        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-brand to-brand-500 shadow-sm">
+          <Download className="h-5 w-5 text-white" />
+        </div>
+        <div>
+          <h2 className="text-base font-semibold text-foreground">Database Backup</h2>
+          <p className="text-xs text-foreground/60">Create a manual backup of your entire database</p>
+        </div>
+      </div>
       <p className="mb-4 text-sm text-foreground/60">
-        Create a manual backup of your entire database. Backups run automatically at 2 AM IST daily and are retained for 30 days.
+        Backups run automatically at 2 AM IST daily and are retained for 30 days.
       </p>
       <div className="flex flex-col gap-4">
         <Button type="button" onClick={triggerBackup} disabled={busy} className="self-start">
-          {busy ? "Backing up..." : "Create Backup Now"}
+          {busy ? (
+            <span className="flex items-center gap-2">
+              <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+              Backing up...
+            </span>
+          ) : (
+            <span className="flex items-center gap-2">
+              <Download className="h-4 w-4" />
+              Create Backup Now
+            </span>
+          )}
         </Button>
         {lastBackup && (
-          <p className="text-xs text-foreground/50">Last backup: {lastBackup}</p>
+          <div className="rounded-lg bg-success-light border border-success/20 p-3">
+            <p className="text-xs font-medium text-success">Last backup saved to:</p>
+            <p className="mt-1 text-xs text-foreground/70 font-mono">{lastBackup}</p>
+          </div>
         )}
       </div>
     </Card>

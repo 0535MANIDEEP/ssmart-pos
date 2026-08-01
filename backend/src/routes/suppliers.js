@@ -164,7 +164,7 @@ router.get("/purchases/all", async (req, res) => {
 // POST /api/suppliers/purchases — create purchase invoice (auto-stocks products)
 router.post("/purchases", async (req, res) => {
   try {
-    const { supplierId, invoiceNumber, date, dueDate, items, discountAmount, paymentMethod, notes } = req.body;
+    const { supplierId, invoiceNumber, date, dueDate, items, discountType, discountAmount, paymentMethod, notes } = req.body;
 
     if (!supplierId) return res.status(400).json({ error: "Supplier is required" });
     if (!invoiceNumber?.trim()) return res.status(400).json({ error: "Invoice number is required" });
@@ -178,24 +178,40 @@ router.post("/purchases", async (req, res) => {
 
     let subtotal = 0;
     let totalTax = 0;
+    let totalItemDiscount = 0;
 
-    // Build items with calculated totals
+    // Build items with calculated totals (per-item discount)
     const lineItems = items.map((item) => {
       const unitCost = Number(item.unitCost) || 0;
       const quantity = Number(item.quantity) || 0;
       const taxRate = Number(item.taxRate) || 0;
-      const lineSubtotal = unitCost * quantity;
-      const lineTax = Math.round(lineSubtotal * taxRate / 100 * 100) / 100;
-      const lineTotal = lineSubtotal + lineTax;
+      const lineBase = unitCost * quantity;
 
-      subtotal += lineSubtotal;
+      // Per-item discount
+      const itemDiscType = item.discountType || null;
+      const itemDiscVal = Number(item.discountValue) || 0;
+      let itemDiscount = 0;
+      if (itemDiscType === "percent") {
+        itemDiscount = Math.round(lineBase * itemDiscVal / 100 * 100) / 100;
+      } else if (itemDiscType === "amount") {
+        itemDiscount = Math.min(itemDiscVal, lineBase); // cap at line base
+      }
+
+      const lineNet = lineBase - itemDiscount;
+      const lineTax = Math.round(lineNet * taxRate / 100 * 100) / 100;
+      const lineTotal = lineNet + lineTax;
+
+      subtotal += lineBase;
       totalTax += lineTax;
+      totalItemDiscount += itemDiscount;
 
       return {
         productId: Number(item.productId),
         name: item.name || "",
         quantity,
         unitCost,
+        discountType: itemDiscType,
+        discountValue: itemDiscVal,
         taxRate,
         taxAmount: lineTax,
         total: lineTotal,
@@ -204,7 +220,17 @@ router.post("/purchases", async (req, res) => {
       };
     });
 
-    const totalAmount = subtotal - (Number(discountAmount) || 0) + totalTax;
+    // Bill-level discount (supports % or flat amount)
+    const billDiscType = discountType || null;
+    const billDiscRaw = Number(discountAmount) || 0;
+    let billDiscount = 0;
+    if (billDiscType === "percent") {
+      billDiscount = Math.round(subtotal * billDiscRaw / 100 * 100) / 100;
+    } else {
+      billDiscount = billDiscRaw;
+    }
+
+    const totalAmount = subtotal - totalItemDiscount - billDiscount + totalTax;
 
     const purchase = await prisma.$transaction(async (tx) => {
       // Create purchase invoice
@@ -215,7 +241,8 @@ router.post("/purchases", async (req, res) => {
           date: date ? new Date(date) : new Date(),
           dueDate: dueDate ? new Date(dueDate) : null,
           subtotal,
-          discountAmount: Number(discountAmount) || 0,
+          discountType: billDiscType,
+          discountAmount: billDiscount,
           taxAmount: totalTax,
           totalAmount,
           amountPaid: 0,
@@ -231,11 +258,16 @@ router.post("/purchases", async (req, res) => {
         },
       });
 
-      // Auto-increment stock for each product
+      // Auto-increment stock and update purchase price for each product
       for (const item of lineItems) {
+        const updateData = { stock: { increment: item.quantity } };
+        // Auto-update purchase price if the new cost is different
+        if (item.unitCost > 0) {
+          updateData.purchasePrice = item.unitCost;
+        }
         await tx.product.update({
           where: { id: item.productId },
-          data: { stock: { increment: item.quantity } },
+          data: updateData,
         });
       }
 
@@ -367,8 +399,8 @@ router.get("/bom/all", async (req, res) => {
     const boms = await prisma.billOfMaterial.findMany({
       orderBy: { name: "asc" },
       include: {
-        outputProduct: { select: { id: true, name: true, barcode: true, unit: true } },
-        items: { include: { product: { select: { id: true, name: true, barcode: true, unit: true } } } },
+        outputProduct: { select: { id: true, name: true, barcode: true, unit: true, stock: true } },
+        items: { include: { product: { select: { id: true, name: true, barcode: true, unit: true, purchasePrice: true, stock: true } } } },
       },
     });
     res.json(boms);
@@ -386,6 +418,11 @@ router.post("/bom", async (req, res) => {
     if (!outputProductId) return res.status(400).json({ error: "Output product is required" });
     if (!items || items.length === 0) return res.status(400).json({ error: "At least one ingredient is required" });
 
+    // Fetch purchase prices for auto-cost
+    const productIds = items.map((i) => Number(i.productId));
+    const products = await prisma.product.findMany({ where: { id: { in: productIds } }, select: { id: true, purchasePrice: true } });
+    const priceMap = new Map(products.map((p) => [p.id, p.purchasePrice]));
+
     const bom = await prisma.billOfMaterial.create({
       data: {
         name: name.trim(),
@@ -393,16 +430,20 @@ router.post("/bom", async (req, res) => {
         outputProductId: Number(outputProductId),
         outputQuantity: Number(outputQuantity) || 1,
         items: {
-          create: items.map((item) => ({
-            productId: Number(item.productId),
-            quantity: Number(item.quantity),
-            unit: item.unit || null,
-          })),
+          create: items.map((item) => {
+            const pid = Number(item.productId);
+            return {
+              productId: pid,
+              quantity: Number(item.quantity),
+              unit: item.unit || null,
+              cost: Number(item.cost) || priceMap.get(pid) || 0,
+            };
+          }),
         },
       },
       include: {
-        outputProduct: { select: { id: true, name: true, barcode: true } },
-        items: { include: { product: { select: { id: true, name: true, barcode: true } } } },
+        outputProduct: { select: { id: true, name: true, barcode: true, stock: true } },
+        items: { include: { product: { select: { id: true, name: true, barcode: true, purchasePrice: true, stock: true } } } },
       },
     });
     res.status(201).json(bom);
@@ -457,6 +498,57 @@ router.post("/bom/:id/produce", async (req, res) => {
   } catch (err) {
     console.error("POST /api/suppliers/bom/:id/produce error:", err);
     res.status(500).json({ error: err.message || "Failed to produce BOM" });
+  }
+});
+
+// PUT /api/suppliers/bom/:id — update BOM
+router.put("/bom/:id", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { name, description, outputProductId, outputQuantity, items } = req.body;
+    if (!name?.trim()) return res.status(400).json({ error: "BOM name is required" });
+    if (!outputProductId) return res.status(400).json({ error: "Output product is required" });
+    if (!items || items.length === 0) return res.status(400).json({ error: "At least one ingredient is required" });
+
+    const existing = await prisma.billOfMaterial.findUnique({ where: { id } });
+    if (!existing) return res.status(404).json({ error: "BOM not found" });
+
+    // Fetch purchase prices for auto-cost
+    const productIds = items.map((i) => Number(i.productId));
+    const prodList = await prisma.product.findMany({ where: { id: { in: productIds } }, select: { id: true, purchasePrice: true } });
+    const priceMap = new Map(prodList.map((p) => [p.id, p.purchasePrice]));
+
+    // Delete old items and recreate
+    await prisma.bomItem.deleteMany({ where: { bomId: id } });
+
+    const bom = await prisma.billOfMaterial.update({
+      where: { id },
+      data: {
+        name: name.trim(),
+        description: description?.trim() || null,
+        outputProductId: Number(outputProductId),
+        outputQuantity: Number(outputQuantity) || 1,
+        items: {
+          create: items.map((item) => {
+            const pid = Number(item.productId);
+            return {
+              productId: pid,
+              quantity: Number(item.quantity),
+              unit: item.unit || null,
+              cost: Number(item.cost) || priceMap.get(pid) || 0,
+            };
+          }),
+        },
+      },
+      include: {
+        outputProduct: { select: { id: true, name: true, barcode: true, stock: true } },
+        items: { include: { product: { select: { id: true, name: true, barcode: true, purchasePrice: true, stock: true } } } },
+      },
+    });
+    res.json(bom);
+  } catch (err) {
+    console.error("PUT /api/suppliers/bom/:id error:", err);
+    res.status(500).json({ error: "Failed to update BOM" });
   }
 });
 

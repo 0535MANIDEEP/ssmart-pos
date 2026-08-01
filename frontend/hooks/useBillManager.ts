@@ -236,7 +236,7 @@ export default function useBillManager(): UseBillManagerReturn {
         }
         return {
           ...prev,
-          cartItems: [...prev.cartItems, { product, quantity }],
+          cartItems: [...prev.cartItems, { product, quantity, rateTier: null, discountType: null, discountValue: 0 }],
         };
       });
     },

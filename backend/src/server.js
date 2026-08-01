@@ -20,6 +20,8 @@ const backupRoutes = require('./routes/backup');
 const accountingRoutes = require('./routes/accounting');
 const migrateRoutes = require('./routes/migrate');
 const supplierRoutes = require('./routes/suppliers');
+const salesmanRoutes = require('./routes/salesmen');
+const packingRoutes = require('./routes/packing');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -59,8 +61,15 @@ app.use('/api/backup', backupRoutes);
 app.use('/api/accounting', accountingRoutes);
 app.use('/api/migrate', migrateRoutes);
 app.use('/api/suppliers', supplierRoutes);
+app.use('/api/salesmen', salesmanRoutes);
+app.use('/api/packing', packingRoutes);
 
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
+
+// Prevent server crash from stray async errors outside Express
+process.on('unhandledRejection', (reason) => {
+  console.error('[UNHANDLED REJECTION]', reason);
+});
 
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {

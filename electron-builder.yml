@@ -1,0 +1,69 @@
+appId: com.ssmart.pos
+productName: SS Mart
+copyright: Copyright © 2026 Manideep Daram
+description: Offline-first POS and inventory management for SS Mart, Shankarpally
+
+directories:
+  output: dist-electron
+  buildResources: build-resources
+
+files:
+  - electron/**/*
+  - backend/src/**/*
+  - backend/prisma/**/*
+  - backend/node_modules/**/*
+  - backend/package.json
+  - frontend/.next/**/*
+  - frontend/node_modules/**/*
+  - frontend/public/**/*
+  - frontend/package.json
+  - "!**/node_modules/.cache/**"
+  - "!**/.git/**"
+
+extraResources:
+  - from: backend/data
+    to: data
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: build-resources/icon.ico
+  artifactName: "SSMart-Setup-${version}.${ext}"
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  installerIcon: build-resources/icon.ico
+  uninstallerIcon: build-resources/icon.ico
+  installerHeaderIcon: build-resources/icon.ico
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: SS Mart POS
+  installationDirectory: "$LOCALAPPDATA\\SSMart"
+  uninstallDisplayName: SS Mart POS
+
+mac:
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+  icon: build-resources/icon.icns
+  category: public.app-category.business
+
+linux:
+  target:
+    - target: AppImage
+      arch:
+        - x64
+  icon: build-resources/icon.png
+  category: Office
+
+publish:
+  provider: github
+  owner: 0535MANIDEEP
+  repo: ssmart-pos

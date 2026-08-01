@@ -18,9 +18,9 @@ interface ToastContextValue {
 const ToastContext = createContext<ToastContextValue | null>(null);
 
 const variantConfig = {
-  success: { icon: CheckCircle2, border: "border-success/20", bg: "bg-success-light", text: "text-success" },
-  error: { icon: AlertCircle, border: "border-danger/20", bg: "bg-danger-light", text: "text-danger" },
-  info: { icon: Info, border: "border-border", bg: "bg-surface", text: "text-foreground" },
+  success: { icon: CheckCircle2, border: "border-success/30", bg: "bg-success-light", text: "text-success", gradient: "from-success/10 to-success-light" },
+  error: { icon: AlertCircle, border: "border-danger/30", bg: "bg-danger-light", text: "text-danger", gradient: "from-danger/10 to-danger-light" },
+  info: { icon: Info, border: "border-brand/20", bg: "bg-brand-light", text: "text-brand", gradient: "from-brand/10 to-brand-light" },
 };
 
 export function ToastProvider({ children }: { children: ReactNode }) {
@@ -49,13 +49,15 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             <div
               key={toast.id}
               role="status"
-              className={`flex items-start gap-3 rounded-lg border ${config.border} ${config.bg} px-4 py-3 shadow-lg animate-slide-up`}
+              className={`flex items-start gap-3 rounded-xl border ${config.border} bg-gradient-to-r ${config.gradient} px-4 py-3 shadow-lg animate-slide-in-right backdrop-blur-sm`}
             >
-              <Icon className={`h-4 w-4 shrink-0 mt-0.5 ${config.text}`} />
-              <p className="flex-1 text-[13px] leading-snug text-foreground">{toast.message}</p>
+              <div className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full ${config.bg}`}>
+                <Icon className={`h-3.5 w-3.5 ${config.text}`} />
+              </div>
+              <p className="flex-1 pt-0.5 text-[13px] leading-snug text-foreground">{toast.message}</p>
               <button
                 onClick={() => dismiss(toast.id)}
-                className="shrink-0 rounded p-0.5 text-text-tertiary hover:text-foreground"
+                className="shrink-0 rounded-lg p-1 text-text-tertiary transition-colors hover:bg-surface/50 hover:text-foreground"
                 aria-label="Dismiss"
               >
                 <X className="h-3.5 w-3.5" />

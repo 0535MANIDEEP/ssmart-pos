@@ -1,24 +1,50 @@
 "use client";
 
 import Link from "next/link";
-import { AlertTriangle, Award, Download, Package, Receipt, Star, TrendingUp, ArrowUpRight, ShoppingCart } from "lucide-react";
+import { AlertTriangle, Award, Check, Download, Flame, Package, Receipt, Star, TrendingUp, ArrowUpRight, ShoppingCart } from "lucide-react";
 import { Card } from "@/components/ui/Card";
+import { Skeleton, SkeletonStatCards, SkeletonTableRows } from "@/components/ui/Skeleton";
 import { Button } from "@/components/ui/Button";
-import { SalesCharts } from "@/components/SalesCharts";
+import dynamic from "next/dynamic";
+const SalesCharts = dynamic(() => import("@/components/SalesCharts").then((m) => m.SalesCharts), {
+  ssr: false,
+  loading: () => <div className="h-64 w-full animate-pulse rounded-xl bg-surface-muted" />,
+});
 import { useLowStock, useProducts } from "@/hooks/useProducts";
 import { useInvoices, useSalesAnalytics, useSalesSummary } from "@/hooks/useInvoices";
 import { useTopLoyaltyCustomers } from "@/hooks/useCustomers";
 import { useShopSettings } from "@/hooks/useShopSettings";
+import { useToast } from "@/components/Toast";
 import { formatMoney, formatDateTime } from "@/lib/format";
+import { api } from "@/lib/api";
+import type { Product } from "@/lib/types";
 
 export default function DashboardPage() {
   const { data: shop } = useShopSettings();
-  const { data: products } = useProducts();
+  const { data: products = [] } = useProducts();
   const { data: lowStock } = useLowStock();
   const { data: summary } = useSalesSummary();
   const { data: invoices } = useInvoices();
   const { data: analytics } = useSalesAnalytics();
   const { data: topCustomers } = useTopLoyaltyCustomers(10);
+  const { show } = useToast();
+
+  const isLoading = !summary || !products;
+  if (isLoading) {
+    return (
+      <div className="flex flex-col gap-6 animate-fade-in">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-bold text-foreground">Dashboard</h1>
+            <p className="text-sm text-text-secondary">Loading overview…</p>
+          </div>
+        </div>
+        <SkeletonStatCards />
+        <Skeleton className="h-64 w-full" />
+        <SkeletonTableRows />
+      </div>
+    );
+  }
 
   const sym = shop?.currencySymbol || "\u20B9";
   const money = (n: number) => formatMoney(n, sym);
@@ -30,7 +56,7 @@ export default function DashboardPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-foreground">Dashboard</h1>
-          <p className="text-sm text-text-secondary">{shop?.shopName || "SS Mart"} — Today&apos;s overview</p>
+          <p className="text-sm text-text-secondary">{shop?.shopName || "SS Mart"} — Today&apos;s overview (auto-refreshes on page load)</p>
         </div>
         <div className="flex gap-2">
           <Link href="/pos">
@@ -131,6 +157,20 @@ export default function DashboardPage() {
                   <span className="ml-4 shrink-0 rounded-full bg-warning-light px-3 py-1 text-xs font-semibold text-warning">
                     {product.stock} left
                   </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const reorderQty = product.minStock > 0 ? Math.max(1, product.minStock * 2 - product.stock) : 10;
+                      api.put(`/products/${product.id}`, { stock: product.stock + reorderQty }).then(() => {
+                        show(`Reordered ${reorderQty} units of ${product.name}`, "success");
+                      }).catch(() => {
+                        show(`Failed to reorder ${product.name}`, "error");
+                      });
+                    }}
+                    className="shrink-0 rounded-full bg-success/10 px-2 py-0.5 text-[10px] font-semibold text-success hover:bg-success/20"
+                  >
+                    +{product.minStock > 0 ? Math.max(1, product.minStock * 2 - product.stock) : 10}
+                  </button>
                 </li>
               ))}
             </ul>
@@ -180,6 +220,9 @@ export default function DashboardPage() {
           )}
         </Card>
       </div>
+
+      {/* Expiry Alerts */}
+      <ExpiryAlertAlert products={products} />
 
       {/* Recent invoices */}
       <Card className="p-5">
@@ -242,17 +285,76 @@ function StatCard({
   accent?: "warning";
 }) {
   return (
-    <div className="rounded-xl border border-border bg-surface p-4 shadow-sm hover:shadow-md transition-shadow">
-      <div className="flex items-center gap-3">
-        <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${iconBg}`}>
-          <Icon className={`h-5 w-5 ${iconColor}`} />
+    <div className="group rounded-xl border border-border bg-surface p-5 shadow-sm transition-all duration-200 hover:shadow-md hover:-translate-y-0.5">
+      <div className="flex items-center gap-4">
+        <div className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl ${iconBg} transition-transform duration-200 group-hover:scale-105`}>
+          <Icon className={`h-6 w-6 ${iconColor}`} />
         </div>
         <div className="min-w-0">
-          <p className="text-xs font-medium text-text-secondary">{label}</p>
-          <p className="text-xl font-bold text-foreground tracking-tight truncate">{value}</p>
+          <p className="text-xs font-medium text-text-secondary uppercase tracking-wider">{label}</p>
+          <p className="text-2xl font-bold text-foreground tracking-tight truncate mt-0.5">{value}</p>
         </div>
       </div>
     </div>
+  );
+}
+
+function ExpiryAlertAlert({ products }: { products: Product[] }) {
+  const expired = products.filter((p) => p.expiryDate && new Date(p.expiryDate) < new Date());
+  const expiringSoon = products.filter((p) => {
+    if (!p.expiryDate) return false;
+    const exp = new Date(p.expiryDate);
+    const now = new Date();
+    return exp > now && exp.getTime() - now.getTime() < 30 * 24 * 60 * 60 * 1000;
+  });
+  const totalAlert = expired.length + expiringSoon.length;
+
+  return (
+    <Card className="p-5">
+      <div className="mb-4 flex items-center justify-between">
+        <h2 className="text-base font-semibold text-foreground flex items-center gap-2">
+          <Flame className="h-4 w-4 text-warning" /> Expiry Alerts
+          {totalAlert > 0 && (
+            <span className="rounded-full bg-warning/10 px-2 py-0.5 text-[10px] font-bold text-warning">
+              {totalAlert}
+            </span>
+          )}
+        </h2>
+        <Link href="/inventory" className="text-xs font-medium text-brand hover:underline">
+          View all →
+        </Link>
+      </div>
+      {totalAlert === 0 ? (
+        <div className="flex flex-col items-center py-8 text-center">
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-success-light text-success">
+            <Check className="h-6 w-6" />
+          </div>
+          <p className="mt-3 text-sm font-medium text-foreground">No expiring items</p>
+          <p className="text-xs text-text-tertiary">All products have valid expiry dates</p>
+        </div>
+      ) : (
+        <ul className="divide-y divide-border">
+          {expired.slice(0, 5).map((p) => (
+            <li key={p.id} className="flex items-center justify-between py-3 hover:bg-surface-muted/50 -mx-2 px-2 rounded-lg transition-colors">
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-foreground truncate">{p.name}</p>
+                <p className="text-[11px] text-text-tertiary">Batch: {p.batchNumber || "N/A"} · Exp: {p.expiryDate}</p>
+              </div>
+              <span className="ml-2 shrink-0 rounded-full bg-danger/10 px-3 py-1 text-[10px] font-semibold text-danger">EXPIRED</span>
+            </li>
+          ))}
+          {expiringSoon.slice(0, 5).map((p) => (
+            <li key={p.id} className="flex items-center justify-between py-3 hover:bg-surface-muted/50 -mx-2 px-2 rounded-lg transition-colors">
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-foreground truncate">{p.name}</p>
+                <p className="text-[11px] text-text-tertiary">Batch: {p.batchNumber || "N/A"} · Exp: {p.expiryDate}</p>
+              </div>
+              <span className="ml-2 shrink-0 rounded-full bg-warning/10 px-3 py-1 text-[10px] font-semibold text-warning">EXPIRING</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
   );
 }
 

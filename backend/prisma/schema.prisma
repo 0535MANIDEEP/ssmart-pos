@@ -18,6 +18,16 @@ model User {
   draftBills  DraftBill[]
 }
 
+model Salesman {
+  id        Int      @id @default(autoincrement())
+  name      String
+  phone     String?
+  code      String   @unique
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  invoices  Invoice[]
+}
+
 model ShopSettings {
   id             Int      @id @default(autoincrement())
   shopName       String
@@ -45,22 +55,14 @@ model ShopSettings {
   receiptFooter  String   @default("Thank You! Visit Again.")
   showGst        Boolean  @default(true)
   autoPrintReceipt Boolean @default(false)
-  // Direct-USB (ESC/POS) printing — see backend/src/lib/escposReceipt.js.
-  // Paper width in mm; only 58 or 80 are meaningful (drives the fixed
-  // monospace column count for the raw text layout).
+  // Direct-USB (ESC/POS) printing
   usbPrinterWidth Int @default(80)
-  // How a receipt prints when "auto-print after sale" is on:
-  //   "browser" — the OS/browser print dialog (window.print), the default
-  //               and what a Windows machine with a printer driver uses.
-  //   "usb"     — raw ESC/POS straight to the USB thermal printer, with NO
-  //               modal dialog. Required on a headless/kiosk Debian till
-  //               where the browser print dialog has no configured printer
-  //               and would otherwise hang the screen after every sale.
+  // "browser" | "usb"
   autoPrintMethod String @default("browser")
   // Inventory
   lowStockAlert  Int      @default(5)
   allowNegativeStock Boolean @default(false)
-  // Address lookup (see PinCode below)
+  // Address lookup
   pincode        String?
   // Backup & daily auto-backup schedule (cron syntax, default "0 2 * * *")
   backupSchedule String  @default("0 2 * * *")
@@ -76,27 +78,60 @@ model Product {
   name          String
   category      String?
   hsn           String?
-  unit          String? // UQC code, e.g. "PCS", "KGS" — see frontend/lib/masters.ts UQC_UNITS
-  purchasePrice Float
-  sellingPrice  Float
+  unit          String? // UQC code, e.g. "PCS", "KGS"
+  purchasePrice Float          // cost price from supplier
+  mrp           Float          // MRP (Maximum Retail Price) — GST-inclusive, printed on label
+  sellingPrice  Float          // Our selling price (actual price charged, must be <= MRP)
+  rateA         Float?         // Rate A — Wholesale rate (GST-inclusive)
+  rateB         Float?         // Rate B — Retail rate (GST-inclusive)
+  rateC         Float?         // Rate C — Special/Dealer rate (GST-inclusive)
   taxRate       Float         @default(0) // GST % for this product
   discountType  String?       // "percent" | "amount" | null (no standing discount)
   discountValue Float         @default(0) // interpreted per discountType; applied automatically at checkout
   stock         Int           @default(0)
+  minStock      Int           @default(0) // reorder alert threshold
+  expiryDate    DateTime?     // product expiry date
+  batchNumber   String?       // batch/lot number
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
   invoiceItems  InvoiceItem[]
   returnItems   ReturnItem[]
   purchaseItems PurchaseItem[]
   // BOM / Packing fields
-  isBulk        Boolean       @default(false) // true = sold in bulk (e.g. 50kg bag), not directly at POS
-  packSize      Float?        // if packed product: how many units in this pack (e.g. 1 for 1kg, 5 for 5kg)
-  bulkProductId Int?          // if packed product: links to the bulk parent product
-  bulkProduct   Product?      @relation("BulkToPack", fields: [bulkProductId], references: [id])
+  isBulk        Boolean       @default(false) // true = sold in bulk, not directly at POS
+  packSize      Float?        // pack size (e.g. 1 for 1kg, 5 for 5kg)
+  bulkProductId Int?          // links to bulk parent product
+  bulkProduct   Product?      @relation("BulkToPack", fields: [bulkProductId], references: [id], onDelete: Restrict)
   packedItems   Product[]     @relation("BulkToPack")
   // BOM relations
   outputBoms    BillOfMaterial[] // BOMs that produce this product
   bomItems      BomItem[]        // BOMs that consume this product as ingredient
+  // Packing relations
+  packingsAsBulk  Packing[] @relation("PackingBulk") // packings where this is the bulk item
+  packingsAsPack  Packing[] @relation("PackingPack") // packings where this is the packed item
+  @@index([category])
+  @@index([isBulk])
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PACKING MODULE
+// ═══════════════════════════════════════════════════════════════
+
+model Packing {
+  id            Int      @id @default(autoincrement())
+  bulkProductId Int
+  packProductId Int
+  packWeight    Float    // weight in grams (e.g. 500, 250, 1000)
+  packLabel     String   // e.g. "500 g"
+  mrp           Float    // MRP shown on label (GST-inclusive)
+  sellingPrice  Float    // Our selling price (GST-inclusive)
+  purchasePrice Float    // Derived from bulk cost per gram
+  taxRate       Float    @default(0) // GST % for this pack
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+
+  bulkProduct Product @relation("PackingBulk", fields: [bulkProductId], references: [id], onDelete: Restrict)
+  packProduct Product @relation("PackingPack", fields: [packProductId], references: [id], onDelete: Restrict)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -116,7 +151,7 @@ model Supplier {
   pincode        String?
   contactPerson  String?
   paymentTerms   String?          // e.g. "Net 30", "Cash", "Credit 15 days"
-  outstandingBalance Float        @default(0) // amount owed to supplier
+  outstandingBalance Float        @default(0)
   isActive       Boolean          @default(true)
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt
@@ -127,15 +162,16 @@ model Supplier {
 model PurchaseInvoice {
   id               Int             @id @default(autoincrement())
   supplierId       Int
-  supplier         Supplier        @relation(fields: [supplierId], references: [id])
-  invoiceNumber    String          // supplier's invoice number (not unique — same supplier may reuse)
+  supplier         Supplier        @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  invoiceNumber    String
   date             DateTime
   dueDate          DateTime?
-  subtotal         Float           @default(0) // sum of line bases before tax
+  subtotal         Float           @default(0)
+  discountType     String?         // "percent" | "amount" | null
   discountAmount   Float           @default(0)
-  taxAmount        Float           @default(0) // total GST on purchase
-  totalAmount      Float           @default(0) // final payable to supplier
-  amountPaid       Float           @default(0) // how much paid already
+  taxAmount        Float           @default(0)
+  totalAmount      Float           @default(0)
+  amountPaid       Float           @default(0)
   status           String          @default("pending") // "pending" | "partial" | "paid" | "returned"
   paymentMethod    String?         // "CASH" | "UPI" | "CARD" | "BANK_TRANSFER" | "CREDIT"
   notes            String?
@@ -153,13 +189,15 @@ model PurchaseItem {
   purchaseInvoiceId Int
   purchaseInvoice   PurchaseInvoice @relation(fields: [purchaseInvoiceId], references: [id], onDelete: Cascade)
   productId         Int
-  product           Product         @relation(fields: [productId], references: [id])
-  name              String          // snapshot
+  product           Product         @relation(fields: [productId], references: [id], onDelete: Restrict)
+  name              String
   quantity          Int
   unitCost          Float           // cost per unit (excl. tax)
+  discountType      String?         // "percent" | "amount" | null
+  discountValue     Float           @default(0)
   taxRate           Float           @default(0)
   taxAmount         Float           @default(0)
-  total             Float           @default(0) // line total incl. tax
+  total             Float           @default(0)
   batchNumber       String?
   expiryDate        DateTime?
 }
@@ -170,11 +208,11 @@ model PurchaseItem {
 
 model BillOfMaterial {
   id              Int      @id @default(autoincrement())
-  name            String   // e.g. "Rice 1kg Pack", "Sugar 5kg Pack"
+  name            String
   description     String?
-  outputProductId Int      // the packed product this BOM produces
-  outputProduct   Product  @relation(fields: [outputProductId], references: [id])
-  outputQuantity  Int      @default(1) // how many packs produced per batch
+  outputProductId Int
+  outputProduct   Product  @relation(fields: [outputProductId], references: [id], onDelete: Restrict)
+  outputQuantity  Int      @default(1)
   isActive        Boolean  @default(true)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -186,10 +224,11 @@ model BomItem {
   id            Int             @id @default(autoincrement())
   bomId         Int
   bom           BillOfMaterial  @relation(fields: [bomId], references: [id], onDelete: Cascade)
-  productId     Int             // the bulk/raw ingredient
-  product       Product         @relation(fields: [productId], references: [id])
-  quantity      Float           // how much of this ingredient is consumed per batch
+  productId     Int
+  product       Product         @relation(fields: [productId], references: [id], onDelete: Restrict)
+  quantity      Float
   unit          String?         // "KGS", "LITRES", "PCS"
+  cost          Float           @default(0)
 }
 
 model Customer {
@@ -197,10 +236,11 @@ model Customer {
   name          String
   phone         String    @unique
   email         String?
+  rateTier      String    @default("B") // "A" (wholesale) | "B" (retail) | "C" (special)
   loyaltyPoints Int       @default(0)
   totalSpent    Float     @default(0)
-  totalDue      Float     @default(0) // outstanding credit ("udhaar") owed by this customer
-  creditBalance Float     @default(0) // store credit owed TO the customer (e.g. from a return kept as balance)
+  totalDue      Float     @default(0)
+  creditBalance Float     @default(0)
   visits        Int       @default(0)
   createdAt     DateTime  @default(now())
   invoices      Invoice[]
@@ -208,16 +248,13 @@ model Customer {
   returns       Return[]
 }
 
-// A record of each payment a customer makes against their running due
-// balance — kept as its own audit trail rather than just decrementing
-// Customer.totalDue with no history.
 model CustomerDuePayment {
   id         Int      @id @default(autoincrement())
   customerId Int
   amount     Float
   note       String?
   createdAt  DateTime @default(now())
-  customer   Customer @relation(fields: [customerId], references: [id])
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
 }
 
 model Invoice {
@@ -226,74 +263,77 @@ model Invoice {
   customerId     Int?
   customerName   String        @default("Walk-in Customer")
   customerPhone  String?
-  subtotal       Float // sum of line bases, pre-discount, pre-tax
-  discountType   String? // "percent" | "amount"
+  salesmanId     Int?
+  subtotal       Float
+  discountType   String?       // "percent" | "amount"
   discountValue  Float         @default(0)
-  discountAmount Float         @default(0) // manual discount in currency
+  discountAmount Float         @default(0)
   taxAmount      Float         @default(0)
-  loyaltyDiscount Float        @default(0) // currency value of redeemed points
-  totalAmount    Float // final payable
-  paymentMethod  String        @default("CASH") // CASH | UPI | CARD
+  loyaltyDiscount Float        @default(0)
+  totalAmount    Float
+  paymentMethod  String        @default("CASH")
   amountPaid     Float         @default(0)
   changeDue      Float         @default(0)
-  dueAmount      Float         @default(0) // unpaid shortfall added to the customer's running due ("udhaar")
-  previousDuePaid Float        @default(0) // old due the customer cleared as part of this same bill
-  returnValue    Float         @default(0) // value of items returned on this bill, netted against the sale
-  creditApplied  Float         @default(0) // store credit the customer spent on this bill
-  refundValue    Float         @default(0) // paid back to the customer (returns beyond the purchase) as cash or credit
-  refundMode     String? // "CASH" | "CREDIT" — how refundValue was settled
+  dueAmount      Float         @default(0)
+  previousDuePaid Float        @default(0)
+  returnValue    Float         @default(0)
+  creditApplied  Float         @default(0)
+  refundValue    Float         @default(0)
+  refundMode     String?
   pointsRedeemed Int           @default(0)
   pointsEarned   Int           @default(0)
   createdAt      DateTime      @default(now())
-  customer       Customer?     @relation(fields: [customerId], references: [id])
+  customer       Customer?     @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  salesman       Salesman?     @relation(fields: [salesmanId], references: [id], onDelete: SetNull)
   items          InvoiceItem[]
   payments       InvoicePayment[]
   returns        Return[]
+  @@index([customerId])
+  @@index([createdAt])
 }
 
-// Individual payment line on an invoice — supports split payments
-// (e.g. ₹200 cash + ₹50 UPI in a single transaction)
 model InvoicePayment {
   id        Int     @id @default(autoincrement())
   invoiceId Int
   invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
-  method    String  // "CASH" | "UPI" | "CARD"
+  method    String
   amount    Float
+  @@index([invoiceId])
 }
 
 model InvoiceItem {
-  id        Int     @id @default(autoincrement())
-  invoiceId Int
-  productId Int
-  name      String
-  unit      String? // snapshot of the product's UQC at time of sale
-  quantity  Int
-  price     Float // unit selling price at time of sale
-  taxRate   Float   @default(0)
-  taxAmount Float   @default(0) // tax for this line (on discounted base)
-  total     Float // line total incl. tax, after prorated discount
-  invoice   Invoice @relation(fields: [invoiceId], references: [id])
-  product   Product @relation(fields: [productId], references: [id])
-  returnItems ReturnItem[]
+  id            Int     @id @default(autoincrement())
+  invoiceId     Int
+  productId     Int
+  name          String
+  unit          String?
+  rateTier      String?
+  quantity      Int
+  price         Float
+  discountType  String?
+  discountValue Float   @default(0)
+  taxRate       Float   @default(0)
+  taxAmount     Float   @default(0)
+  total         Float
+  invoice       Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  product       Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+  returnItems   ReturnItem[]
+  @@index([productId])
 }
 
-// A return against a past invoice — one or more line items, each capped at
-// (quantity sold - quantity already returned) so the same unit can't be
-// returned twice. "Returned quantity so far" is always computed by summing
-// ReturnItem rows for an invoice item (see routes/returns.js) rather than
-// stored as a running counter, matching CustomerDuePayment's audit-trail
-// pattern elsewhere in this schema.
 model Return {
   id           Int          @id @default(autoincrement())
   invoiceId    Int
   customerId   Int?
   totalRefund  Float
-  refundMethod String // "CASH" | "UPI" | "CARD" | "DUE_ADJUST"
+  refundMethod String
   note         String?
   createdAt    DateTime     @default(now())
-  invoice      Invoice      @relation(fields: [invoiceId], references: [id])
-  customer     Customer?    @relation(fields: [customerId], references: [id])
+  invoice      Invoice      @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  customer     Customer?    @relation(fields: [customerId], references: [id], onDelete: SetNull)
   items        ReturnItem[]
+  @@index([invoiceId])
+  @@index([customerId])
 }
 
 model ReturnItem {
@@ -304,16 +344,15 @@ model ReturnItem {
   name          String
   quantity      Int
   refundAmount  Float
-  return        Return      @relation(fields: [returnId], references: [id])
-  invoiceItem   InvoiceItem @relation(fields: [invoiceItemId], references: [id])
-  product       Product     @relation(fields: [productId], references: [id])
+  return        Return      @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  invoiceItem   InvoiceItem @relation(fields: [invoiceItemId], references: [id], onDelete: Restrict)
+  product       Product     @relation(fields: [productId], references: [id], onDelete: Restrict)
+  @@index([returnId])
+  @@index([invoiceItemId])
+  @@index([productId])
 }
 
 // --- Bulk reference data, admin-imported from CSV (see routes/masters.js) ---
-// Large/volatile government datasets (full HSN/SAC catalogs, PIN codes,
-// IFSC) are deliberately NOT bundled with the app — see README > Reference
-// data & validation. These tables just give the admin somewhere to load
-// the official file into, if/when they want autocomplete and lookups.
 
 model TaxCode {
   id          Int     @id @default(autoincrement())
@@ -344,7 +383,7 @@ model IfscCode {
 model DraftBill {
   id        Int      @id @default(autoincrement())
   userId    Int
-  user      User     @relation(fields: [userId], references: [id])
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   label     String?
   state     String
   isHeld    Boolean  @default(false)
@@ -357,39 +396,36 @@ model DraftBill {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// ACCOUNTING MODULE — Double-entry bookkeeping (MARG ERP replacement)
+// ACCOUNTING MODULE — Double-entry bookkeeping
 // ═══════════════════════════════════════════════════════════════════════
 
 model AccountGroup {
   id         Int      @id @default(autoincrement())
-  code       String   @unique // e.g. "1.1.3"
+  code       String   @unique
   name       String
   parentId   Int?
-  parent     AccountGroup?  @relation("GroupTree", fields: [parentId], references: [id])
+  parent     AccountGroup?  @relation("GroupTree", fields: [parentId], references: [id], onDelete: SetNull)
   children   AccountGroup[] @relation("GroupTree")
   nature     String         // "debit" | "credit"
   reportType String         // "balance_sheet" | "profit_loss"
-  // Classification flags (replaces hardcoded code prefix checks)
-  bsCategory String?        // "asset" | "liability" | "capital" — balance sheet classification
-  cfCategory String?        // "operating" | "investing" | "financing" — cash flow classification
-  isSystem   Boolean  @default(false) // built-in groups can't be deleted
+  bsCategory String?        // "asset" | "liability" | "capital"
+  cfCategory String?        // "operating" | "investing" | "financing"
+  isSystem   Boolean  @default(false)
   createdAt  DateTime @default(now())
   ledgers    Ledger[]
+  @@index([parentId])
 }
 
 model Ledger {
   id            Int      @id @default(autoincrement())
   name          String
   groupId       Int
-  group         AccountGroup @relation(fields: [groupId], references: [id])
+  group         AccountGroup @relation(fields: [groupId], references: [id], onDelete: Restrict)
   openingDebit  Float    @default(0)
   openingCredit Float    @default(0)
   isSystem      Boolean  @default(false)
-  linkedEntityType String? // "customer" | "supplier" | null
+  linkedEntityType String?
   linkedEntityId   Int?
-  // Purpose tag: used by auto-journal to find the right ledger dynamically
-  // e.g. "cash", "bank", "sales", "purchases", "gst_cgst", "gst_sgst",
-  // "gst_igst", "discount_allowed", "capital", "receivable", "payable"
   purpose       String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
@@ -397,13 +433,14 @@ model Ledger {
   balances      LedgerBalance[]
   expenses      Expense[]
   @@unique([groupId, name])
+  @@index([purpose])
 }
 
 model LedgerBalance {
   id             Int      @id @default(autoincrement())
   ledgerId       Int
-  ledger         Ledger   @relation(fields: [ledgerId], references: [id])
-  yearStart      DateTime // financial year start (e.g. 2026-04-01)
+  ledger         Ledger   @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
+  yearStart      DateTime
   openingDebit   Float    @default(0)
   openingCredit  Float    @default(0)
   debitTotal     Float    @default(0)
@@ -414,7 +451,7 @@ model LedgerBalance {
 
 model FinancialYear {
   id        Int      @id @default(autoincrement())
-  name      String   @unique // "2026-27"
+  name      String   @unique
   startDate DateTime @unique
   endDate   DateTime @unique
   isClosed  Boolean  @default(false)
@@ -425,8 +462,8 @@ model Journal {
   id            Int      @id @default(autoincrement())
   voucherNumber String   @unique
   date          DateTime
-  type          String   // "sales" | "purchase" | "payment" | "receipt" | "journal" | "contra" | "credit_note" | "debit_note"
-  referenceType String?  // "invoice" | "return" | "payment" | null
+  type          String
+  referenceType String?
   referenceId   Int?
   narration     String?
   totalDebit    Float    @default(0)
@@ -446,20 +483,22 @@ model JournalLine {
   journalId Int
   journal   Journal @relation(fields: [journalId], references: [id], onDelete: Cascade)
   ledgerId  Int
-  ledger    Ledger  @relation(fields: [ledgerId], references: [id])
+  ledger    Ledger  @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
   debit     Float   @default(0)
   credit    Float   @default(0)
-  taxType   String? // "CGST" | "SGST" | "IGST" | null
+  taxType   String?
   taxAmount Float   @default(0)
+  @@index([ledgerId])
+  @@index([journalId])
 }
 
 model Expense {
   id           Int      @id @default(autoincrement())
   date         DateTime
   ledgerId     Int
-  ledger       Ledger   @relation(fields: [ledgerId], references: [id])
+  ledger       Ledger   @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
   amount       Float
-  paymentMode  String   // "cash" | "bank" | "upi"
+  paymentMode  String
   bankLedgerId Int?
   reference    String?
   narration    String?
@@ -471,7 +510,7 @@ model Expense {
 model BankReconciliation {
   id            Int      @id @default(autoincrement())
   journalId     Int
-  journal       Journal  @relation(fields: [journalId], references: [id])
+  journal       Journal  @relation(fields: [journalId], references: [id], onDelete: Cascade)
   statementDate DateTime
   statementRef  String?
   reconciled    Boolean  @default(false)
@@ -490,13 +529,13 @@ model CostCenter {
 
 model MigrationLog {
   id              Int      @id @default(autoincrement())
-  source          String   // "marg" | "tally" | "manual"
-  dataType        String   // "ledgers" | "products" | "customers" | "opening_balances"
+  source          String
+  dataType        String
   filename        String?
   recordsImported Int      @default(0)
   recordsSkipped  Int      @default(0)
   errors          String?
-  status          String   // "success" | "partial" | "failed"
+  status          String
   createdBy       Int
   createdAt       DateTime @default(now())
 }

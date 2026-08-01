@@ -39,17 +39,25 @@ router.post('/', async (req, res) => {
 
       const settings = await tx.shopSettings.findFirst();
       const itemMap = new Map(invoice.items.map((it) => [it.id, it]));
+
+      // Batch-fetch already-returned quantities for all invoice items (avoids N+1)
+      const alreadyReturnedMap = new Map();
+      {
+        const agg = await tx.returnItem.groupBy({
+          by: ['invoiceItemId'],
+          where: { invoiceItemId: { in: invoice.items.map(it => it.id) } },
+          _sum: { quantity: true },
+        });
+        for (const a of agg) alreadyReturnedMap.set(a.invoiceItemId, a._sum.quantity || 0);
+      }
+
       const returnLines = [];
       for (const line of body.items) {
         const invoiceItem = itemMap.get(line.invoiceItemId);
         if (!invoiceItem || invoiceItem.invoiceId !== invoice.id) {
           throw Object.assign(new Error('Invoice item not found on this invoice'), { status: 404 });
         }
-        const alreadyReturned = await tx.returnItem.aggregate({
-          where: { invoiceItemId: invoiceItem.id },
-          _sum: { quantity: true },
-        });
-        const returnable = invoiceItem.quantity - (alreadyReturned._sum.quantity || 0);
+        const returnable = invoiceItem.quantity - (alreadyReturnedMap.get(invoiceItem.id) || 0);
         if (line.quantity > returnable) {
           throw Object.assign(
             new Error(`Only ${returnable} of "${invoiceItem.name}" can still be returned`),

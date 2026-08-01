@@ -67,17 +67,27 @@ export interface Product {
   category: string | null;
   hsn: string | null;
   unit: string | null;
-  purchasePrice: number;
-  sellingPrice: number;
+  purchasePrice: number; // cost price from supplier
+  mrp: number; // MRP (Maximum Retail Price) — GST-inclusive, printed on label
+  sellingPrice: number; // our actual selling price (must be <= MRP)
+  rateA: number | null; // Rate A — Wholesale
+  rateB: number | null; // Rate B — Retail
+  rateC: number | null; // Rate C — Special/Dealer
   taxRate: number;
   discountType: "percent" | "amount" | null;
   discountValue: number;
   stock: number;
+  minStock: number; // reorder alert threshold
+  expiryDate: string | null; // product expiry date
+  batchNumber: string | null; // batch/lot number
   isBulk: boolean;
   packSize: number | null;
   bulkProductId: number | null;
   createdAt: string;
   updatedAt: string;
+  // Packing metadata
+  packWeight?: number | null; // weight in grams for pack variants
+  packLabel?: string | null; // display label like "500g"
 }
 
 export interface Customer {
@@ -85,6 +95,7 @@ export interface Customer {
   name: string;
   phone: string;
   email: string | null;
+  rateTier: "A" | "B" | "C"; // default rate tier for this customer
   loyaltyPoints: number;
   totalSpent: number;
   totalDue: number;
@@ -93,13 +104,25 @@ export interface Customer {
   createdAt: string;
 }
 
+export interface Salesman {
+  id: number;
+  name: string;
+  phone: string | null;
+  code: string;
+  active: boolean;
+  createdAt: string;
+}
+
 export interface InvoiceItem {
   id: number;
   productId: number;
   name: string;
   unit: string | null;
+  rateTier: string | null;
   quantity: number;
   price: number;
+  discountType: string | null;
+  discountValue: number;
   taxRate: number;
   taxAmount: number;
   total: number;
@@ -142,6 +165,9 @@ export interface InvoicePayment {
 export interface CartItem {
   product: Product;
   quantity: number;
+  rateTier: "A" | "B" | "C" | null; // rate tier selected per line item (null = MRP)
+  discountType: "percent" | "amount" | null; // per-item discount
+  discountValue: number; // per-item discount value
 }
 
 export type PaymentMethod = "CASH" | "UPI" | "CARD";
@@ -197,6 +223,8 @@ export interface PurchaseItem {
   name: string;
   quantity: number;
   unitCost: number;
+  discountType: string | null;
+  discountValue: number;
   taxRate: number;
   taxAmount: number;
   total: number;
@@ -212,6 +240,7 @@ export interface PurchaseInvoice {
   date: string;
   dueDate: string | null;
   subtotal: number;
+  discountType: string | null;
   discountAmount: number;
   taxAmount: number;
   totalAmount: number;
@@ -233,7 +262,24 @@ export interface BomItem {
   productId: number;
   quantity: number;
   unit: string | null;
-  product?: { id: number; name: string; barcode: string; unit: string | null };
+  cost?: number;
+  product?: { id: number; name: string; barcode: string; unit: string | null; purchasePrice?: number; stock?: number };
+}
+
+export interface Packing {
+  id: number;
+  bulkProductId: number;
+  packProductId: number;
+  packWeight: number;
+  packLabel: string;
+  mrp: number;
+  sellingPrice: number;
+  purchasePrice: number;
+  taxRate: number;
+  active: boolean;
+  createdAt: string;
+  bulkProduct?: { id: number; name: string; barcode: string; unit: string | null; stock: number; purchasePrice: number };
+  packProduct?: { id: number; name: string; barcode: string; unit: string | null; stock: number; purchasePrice: number; sellingPrice: number; rateA: number | null; rateB: number | null; rateC: number | null; taxRate: number };
 }
 
 export interface BillOfMaterial {

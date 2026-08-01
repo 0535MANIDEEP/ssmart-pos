@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { Search, Undo2, X } from "lucide-react";
 import { Card } from "@/components/ui/Card";
+import { SkeletonTable } from "@/components/ui/Skeleton";
 import { Button } from "@/components/ui/Button";
 import { ReceiptActions } from "@/components/ReceiptActions";
 import { useInvoices, useInvoice } from "@/hooks/useInvoices";
@@ -10,7 +11,7 @@ import { useCreateReturn, useReturnsForInvoice } from "@/hooks/useReturns";
 import { useShopSettings } from "@/hooks/useShopSettings";
 import { useToast } from "@/components/Toast";
 import { formatMoney, formatDateTime, formatDate } from "@/lib/format";
-import { ApiError } from "@/lib/api";
+import { ApiError, describeApiError } from "@/lib/api";
 import type { RefundMethod } from "@/lib/types";
 
 export default function SalesPage() {
@@ -127,7 +128,7 @@ function InvoiceDrawer({ id, sym, onClose }: { id: number; sym: string; onClose:
       setReturnQty({});
       show(`Returned ${returnPreview.count} item(s) — ${money(returnPreview.amount)} refunded`, "success");
     } catch (err) {
-      show(err instanceof ApiError ? err.message : "Return failed", "error");
+      show(describeApiError(err, "Return failed"), "error");
     }
   }
 

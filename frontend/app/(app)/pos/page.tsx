@@ -1,10 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Minus, Plus, ScanBarcode, Trash2, Search, Star, CheckCircle2, X,
   ArrowLeft, RotateCcw, Banknote, CreditCard, Smartphone, CircleDollarSign,
+  Power, HelpCircle, WifiOff,
 } from "lucide-react";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -14,7 +15,7 @@ import { BillConfirmDialog } from "@/components/BillConfirmDialog";
 import { ReturnPanel, type ReturnDraftLine } from "@/components/ReturnPanel";
 import { QuantityPopover } from "@/components/QuantityPopover";
 import { useBarcodeScanner } from "@/hooks/useBarcodeScanner";
-import { useProducts } from "@/hooks/useProducts";
+import { ProductSearch } from "@/components/ProductSearch";
 import { useShopSettings } from "@/hooks/useShopSettings";
 import { useToast } from "@/components/Toast";
 import { api, ApiError, describeApiError } from "@/lib/api";
@@ -23,7 +24,10 @@ import { openReceiptPrint } from "@/lib/print";
 import { effectivePrice, quoteSale } from "@/lib/quote";
 import { loadDrafts, saveDraft, deleteDraft } from "@/lib/drafts";
 import { loadDraftsLocal, saveDraftLocal, deleteDraftLocal } from "@/lib/drafts-local";
-import type { CartItem, Customer, Invoice, PaymentMethod, Product } from "@/lib/types";
+import { getProductByBarcode, saveOfflineInvoice, updateProductStock, findCustomerByPhone, type OfflineProduct } from "@/lib/offline-store";
+import { useOnlineStatus } from "@/hooks/useOnlineStatus";
+import { printOfflineReceipt } from "@/lib/offline-receipt";
+import type { CartItem, Customer, Invoice, PaymentMethod, Product, Salesman } from "@/lib/types";
 
 interface PaymentLine {
   method: PaymentMethod;
@@ -42,7 +46,7 @@ export default function PosPage() {
   const { show } = useToast();
   const queryClient = useQueryClient();
   const posRef = useRef<HTMLDivElement>(null);
-  const qtyInputRef = useRef<HTMLInputElement>(null);
+  const isOnline = useOnlineStatus();
 
   const [cart, setCart] = useState<CartItem[]>([]);
   const [customer, setCustomer] = useState<Customer | null>(null);
@@ -61,11 +65,21 @@ export default function PosPage() {
   const [autoSaveStatus, setAutoSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
   const [showShutdownDialog, setShowShutdownDialog] = useState(false);
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
-  const [manualQuery, setManualQuery] = useState("");
-  const [committedQuery, setCommittedQuery] = useState("");
+  const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [focusedCartIndex, setFocusedCartIndex] = useState<number | null>(null);
   const [recoveryDraft, setRecoveryDraft] = useState<{ id: number; state: Record<string, unknown>; updatedAt: string } | null>(null);
   const [showRecoveryDialog, setShowRecoveryDialog] = useState(false);
+  const [heldBills, setHeldBills] = useState<{ id: string; cart: CartItem[]; customerName: string; customerPhone: string; discountType: "percent" | "amount" | null; discountValue: number; timestamp: number }[]>(() => {
+    try {
+      const saved = localStorage.getItem("ssmart-held-bills");
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [showHeldBills, setShowHeldBills] = useState(false);
+  const [salesmanId, setSalesmanId] = useState<number | null>(null);
+  const { data: salesmen = [] } = useQuery<Salesman[]>({ queryKey: ["salesmen"], queryFn: () => api.get<Salesman[]>("/salesmen"), enabled: true });
   const billIdRef = useRef(`bill_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`);
   const draftDbIdRef = useRef<number | null>(null);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -111,12 +125,6 @@ export default function PosPage() {
     return () => { if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current); };
   }, [cart, customerName, customerPhone, discountType, discountValue, payments, pointsRedeemed, duePaid, returnLines]);
 
-  useEffect(() => {
-    const t = setTimeout(() => setCommittedQuery(manualQuery.trim()), 200);
-    return () => clearTimeout(t);
-  }, [manualQuery]);
-  const { data: manualResults } = useProducts(committedQuery);
-
   const sym = shop?.currencySymbol || "\u20B9";
   const money = (n: number) => formatMoney(n, sym);
 
@@ -134,22 +142,23 @@ export default function PosPage() {
   const grossRefund = Math.max(0, round2(-netBill));
 
   // Split payments calculations
-  const totalTendered = round2(payments.reduce((s, p) => s + p.amount, 0));
-  const cashTendered = round2(payments.filter((p) => p.method === "CASH").reduce((s, p) => s + p.amount, 0));
+  const paymentDerived = useMemo(() => {
+    const totalTendered = round2(payments.reduce((s, p) => s + p.amount, 0));
+    const cashTendered = round2(payments.filter((p) => p.method === "CASH").reduce((s, p) => s + p.amount, 0));
+    const pool = round2(totalTendered + grossRefund);
+    const amountAppliedToGoods = round2(Math.min(pool, payable));
+    const afterGoods = round2(Math.max(0, pool - amountAppliedToGoods));
+    const duePaidFinal = round2(Math.min(dueToClear, afterGoods));
+    const leftover = round2(Math.max(0, afterGoods - duePaidFinal));
+    const changeDue = grossRefund === 0 && totalTendered > 0 ? round2(Math.max(0, totalTendered - amountAppliedToGoods - duePaidFinal)) : 0;
+    const refundValue = grossRefund > 0 ? leftover : 0;
+    const collectTotal = round2(payable + dueToClear);
+    const remainingToPay = round2(Math.max(0, collectTotal - totalTendered));
+    const shortNow = totalTendered > 0 && grossRefund === 0 ? Math.max(0, round2(collectTotal - totalTendered)) : 0;
+    return { totalTendered, cashTendered, pool, amountAppliedToGoods, afterGoods, duePaidFinal, leftover, changeDue, refundValue, collectTotal, remainingToPay, shortNow };
+  }, [payments, grossRefund, payable, dueToClear]);
 
-  const pool = round2(totalTendered + grossRefund);
-  const amountAppliedToGoods = round2(Math.min(pool, payable));
-  const afterGoods = round2(Math.max(0, pool - amountAppliedToGoods));
-  const duePaidFinal = round2(Math.min(dueToClear, afterGoods));
-  const leftover = round2(Math.max(0, afterGoods - duePaidFinal));
-  const changeDue = grossRefund === 0 && totalTendered > 0 ? round2(Math.max(0, totalTendered - amountAppliedToGoods - duePaidFinal)) : 0;
-  const refundValue = grossRefund > 0 ? leftover : 0;
-  const collectTotal = round2(payable + dueToClear);
-  const remainingToPay = round2(Math.max(0, collectTotal - totalTendered));
-  const shortNow =
-    totalTendered > 0 && grossRefund === 0
-      ? Math.max(0, round2(collectTotal - totalTendered))
-      : 0;
+  const { totalTendered, changeDue, refundValue, collectTotal, remainingToPay, shortNow, duePaidFinal } = paymentDerived;
 
   const addToCart = useCallback(
     (product: Product) => {
@@ -164,7 +173,7 @@ export default function PosPage() {
         }
 
         const existing = prev.find((item) => item.product.id === product.id);
-        if (!existing) return [...prev, { product, quantity: 1 }];
+        if (!existing) return [...prev, { product, quantity: 1, rateTier: customer?.rateTier || "B", discountType: null, discountValue: 0 }];
         if (existing.quantity >= effectiveStock) {
           show(`Only ${effectiveStock} in stock for "${product.name}"`, "error");
           return prev;
@@ -173,9 +182,15 @@ export default function PosPage() {
           item.product.id === product.id ? { ...item, quantity: item.quantity + 1 } : item
         );
       });
+      // Loss warning: selling below cost
+      const rateTier = customer?.rateTier || "B";
+      const ep = effectivePrice(product, rateTier);
+      if (product.purchasePrice > 0 && ep < product.purchasePrice) {
+        show(`LOSS: "${product.name}" selling at ${money(ep)} but cost is ${money(product.purchasePrice)}`, "error");
+      }
       setFocusedCartIndex(null);
     },
-    [show]
+    [show, customer]
   );
 
   const handleScan = useCallback(
@@ -184,8 +199,18 @@ export default function PosPage() {
         const product = await api.get<Product>(`/products/barcode/${encodeURIComponent(code)}`);
         addToCart(product);
       } catch (err) {
-        if (err instanceof ApiError && err.status === 404) show("Product not found. Please add to inventory.", "error");
-        else show("Barcode lookup failed", "error");
+        // If offline or network error, try local IndexedDB
+        if (!navigator.onLine || (err instanceof ApiError && err.status === 0)) {
+          const localProduct = await getProductByBarcode(code);
+          if (localProduct) {
+            addToCart(localProduct as unknown as Product);
+            return;
+          }
+          show("Offline — product not found in local cache. Connect to internet to sync products.", "error");
+          return;
+        }
+        if (err instanceof ApiError && err.status === 404) show("Product not found — ask a manager to add this barcode to inventory first.", "error");
+        else show("Could not look up barcode. Check scanner connection and try again.", "error");
       }
     },
     [addToCart, show]
@@ -201,11 +226,25 @@ export default function PosPage() {
       setDuePaid("");
       show(`${c.name} \u2014 ${c.loyaltyPoints} points`, "success");
     } catch (err) {
+      // If offline, try local IndexedDB
+      if (!navigator.onLine || (err instanceof ApiError && err.status === 0)) {
+        const local = await findCustomerByPhone(phone);
+        if (local) {
+          setCustomer(local as unknown as Customer);
+          setCustomerName(local.name);
+          setDuePaid("");
+          show(`${local.name} — ${local.loyaltyPoints} points (offline)`, "success");
+          return;
+        }
+        setCustomer(null);
+        show("New customer — will be created when you sync.", "info");
+        return;
+      }
       if (err instanceof ApiError && err.status === 404) {
         setCustomer(null);
-        show("New customer \u2014 will be created on checkout", "info");
+        show("New customer — will be created automatically when you complete the sale.", "info");
       } else {
-        show("Customer lookup failed", "error");
+        show("Could not look up customer. Check the phone number and try again.", "error");
       }
     }
   }
@@ -229,6 +268,7 @@ export default function PosPage() {
     setDiscountType(null);
     setDiscountValue(0);
     setPointsRedeemed(0);
+    setSalesmanId(null);
     setPayments([{ method: "CASH", amount: 0 }]);
     setFocusedCartIndex(null);
   };
@@ -239,6 +279,14 @@ export default function PosPage() {
     if (!canFinalize || isCheckingOut) return;
     setIsCheckingOut(true);
     setShowShutdownDialog(false);
+
+    // Compute totals for offline fallback
+    const computedTotal = round2(
+      quote.total - returnTotal - creditUse +
+      (duePaidFinal < dueToClear ? dueToClear : 0)
+    );
+    const computedGrandTotal = Math.max(0, computedTotal);
+
     try {
       const returnsPayload = Object.values(
         returnLines.reduce(
@@ -254,10 +302,11 @@ export default function PosPage() {
         )
       );
 
-      const invoice = await api.post<Invoice>("/invoices", {
+      const invoicePayload = {
         customerName,
         customerPhone,
-        items: cart.map((item) => ({ productId: item.product.id, quantity: item.quantity })),
+        salesmanId: salesmanId || null,
+        items: cart.map((item) => ({ productId: item.product.id, quantity: item.quantity, rateTier: item.rateTier, discountType: item.discountType, discountValue: item.discountValue })),
         discountType,
         discountValue: Number(discountValue) || 0,
         pointsRedeemed: Number(pointsRedeemed) || 0,
@@ -266,33 +315,101 @@ export default function PosPage() {
         returns: returnsPayload,
         refundMode,
         creditApplied: creditUse,
-      });
+      };
 
-      const parts = [`${invoice.invoiceNumber} \u00b7 ${money(invoice.totalAmount)}`];
-      if (invoice.previousDuePaid > 0) parts.push(`${money(invoice.previousDuePaid)} due cleared`);
-      if (invoice.refundValue > 0)
-        parts.push(`${money(invoice.refundValue)} refunded (${invoice.refundMode === "CREDIT" ? "store credit" : "cash"})`);
-      if (invoice.discountAmount > 0) parts.push(`${money(invoice.discountAmount)} discount applied`);
-      show(`Done \u2014 ${parts.join(" \u00b7 ")}`, "success");
+      const invoice = await api.post<Invoice>("/invoices", invoicePayload);
+
+      // Check if this was an offline/queued response
+      const isOfflineSale = (invoice as unknown as { offline?: boolean }).offline;
+
+      if (isOfflineSale) {
+        // Generate local invoice number
+        const localInvoiceNumber = `OFF-${Date.now()}`;
+        const localId = Date.now();
+
+        // Save to local IndexedDB
+        await saveOfflineInvoice({
+          id: localId,
+          invoiceNumber: localInvoiceNumber,
+          customerName,
+          customerPhone,
+          salesmanId: salesmanId || null,
+          totalAmount: computedGrandTotal,
+          discountAmount: quote.discountAmount,
+          taxAmount: quote.taxAmount,
+          loyaltyDiscount: quote.loyaltyDiscount,
+          refundValue: refundValue,
+          previousDuePaid: dueToClear,
+          createdAt: new Date().toISOString(),
+          synced: false,
+        });
+
+        // Deduct stock locally
+        for (const item of cart) {
+          await updateProductStock(item.product.id, -item.quantity);
+        }
+
+        show(`Sale saved offline (${localInvoiceNumber}) — will sync when connected`, "success");
+        setCompletedSale({
+          id: localId,
+          invoiceNumber: localInvoiceNumber,
+          totalAmount: computedGrandTotal,
+          changeDue,
+          payments: payments.filter((p) => p.amount > 0).map((p) => ({ method: p.method, amount: p.amount })),
+        });
+        // Auto-print offline receipt if enabled
+        if (shop?.autoPrintReceipt) {
+          setTimeout(() => {
+            printOfflineReceipt({
+              invoiceNumber: localInvoiceNumber,
+              customerName: customerName || "Walk-in",
+              cart,
+              totalAmount: computedGrandTotal,
+              discountAmount: quote.discountAmount,
+              taxAmount: quote.taxAmount,
+              loyaltyDiscount: quote.loyaltyDiscount,
+              payments: payments.filter((p) => p.amount > 0).map((p) => ({ method: p.method, amount: p.amount })),
+              changeDue,
+              currencySymbol: sym,
+              shopName: shop?.shopName,
+              shopAddress: shop?.address1 || undefined,
+              shopCity: shop?.city || undefined,
+              shopPhone: shop?.phone || undefined,
+              gstin: shop?.gstNumber || undefined,
+            });
+          }, 0);
+        }
+      } else {
+        // Normal online sale
+        const parts = [`${invoice.invoiceNumber} \u00b7 ${money(invoice.totalAmount)}`];
+        if (invoice.previousDuePaid > 0) parts.push(`${money(invoice.previousDuePaid)} due cleared`);
+        if (invoice.refundValue > 0)
+          parts.push(`${money(invoice.refundValue)} refunded (${invoice.refundMode === "CREDIT" ? "store credit" : "cash"})`);
+        if (invoice.discountAmount > 0) parts.push(`${money(invoice.discountAmount)} discount applied`);
+        show(`Done \u2014 ${parts.join(" \u00b7 ")}`, "success");
+        setCompletedSale({
+          id: invoice.id,
+          invoiceNumber: invoice.invoiceNumber,
+          totalAmount: invoice.totalAmount,
+          changeDue: invoice.changeDue,
+          payments: payments.filter((p) => p.amount > 0).map((p) => ({ method: p.method, amount: p.amount })),
+        });
+      }
+
       queryClient.invalidateQueries({ queryKey: ["products"] });
       queryClient.invalidateQueries({ queryKey: ["invoices"] });
       queryClient.invalidateQueries({ queryKey: ["customers"] });
-      setCompletedSale({
-        id: invoice.id,
-        invoiceNumber: invoice.invoiceNumber,
-        totalAmount: invoice.totalAmount,
-        changeDue: invoice.changeDue,
-        payments: payments.filter((p) => p.amount > 0).map((p) => ({ method: p.method, amount: p.amount })),
-      });
       resetSale();
+
       // Clear draft after successful checkout
       try { if (draftDbIdRef.current) await deleteDraft(draftDbIdRef.current); } catch {}
       try { if (draftDbIdRef.current) await deleteDraftLocal(draftDbIdRef.current); } catch {}
       draftDbIdRef.current = null;
-      if (shop?.autoPrintReceipt) {
+
+      if (!isOfflineSale && shop?.autoPrintReceipt) {
         if (shop.autoPrintMethod === "usb") {
           api.post(`/print/${invoice.id}/usb`).catch((err) =>
-            show(err instanceof ApiError ? err.message : "Auto-print to USB printer failed", "error")
+            show(describeApiError(err, "Auto-print to USB printer failed"), "error")
           );
         } else {
           setTimeout(() => openReceiptPrint(invoice.id), 0);
@@ -351,12 +468,78 @@ export default function PosPage() {
     setFocusedCartIndex(null);
   }
 
+  function setCartRateTier(productId: number, rateTier: "A" | "B" | "C" | null) {
+    setCart((prev) => {
+      const item = prev.find(i => i.product.id === productId);
+      if (item && rateTier) {
+        const ep = effectivePrice(item.product, rateTier);
+        if (item.product.purchasePrice > 0 && ep < item.product.purchasePrice) {
+          show(`LOSS: "${item.product.name}" at ${money(ep)} is below cost ${money(item.product.purchasePrice)}`, "error");
+        }
+      }
+      return prev.map((i) => i.product.id === productId ? { ...i, rateTier } : i);
+    });
+  }
+
+  function setCartItemDiscount(productId: number, discountType: "percent" | "amount" | null, discountValue: number) {
+    setCart((prev) =>
+      prev.map((item) =>
+        item.product.id === productId ? { ...item, discountType, discountValue } : item
+      )
+    );
+  }
+
+  function holdBill() {
+    if (cart.length === 0) return show("Cart is empty — nothing to hold", "error");
+    const held = {
+      id: `held_${Date.now()}`,
+      cart: [...cart],
+      customerName,
+      customerPhone,
+      discountType,
+      discountValue,
+      timestamp: Date.now(),
+    };
+    setHeldBills((prev) => {
+      const updated = [...prev, held];
+      try { localStorage.setItem("ssmart-held-bills", JSON.stringify(updated)); } catch {}
+      return updated;
+    });
+    setCart([]);
+    setCustomerName("");
+    setCustomerPhone("");
+    setCustomer(null);
+    setDiscountType(null);
+    setDiscountValue(0);
+    setPointsRedeemed(0);
+    setPayments([{ method: "CASH", amount: 0 }]);
+    show(`Bill held (${cart.length} items) — press Recall to get it back`, "info");
+  }
+
+  function recallBill(heldId: string) {
+    const held = heldBills.find((b) => b.id === heldId);
+    if (!held) return;
+    setCart(held.cart);
+    setCustomerName(held.customerName);
+    setCustomerPhone(held.customerPhone);
+    setDiscountType(held.discountType);
+    setDiscountValue(held.discountValue);
+    setHeldBills((prev) => {
+      const updated = prev.filter((b) => b.id !== heldId);
+      try { localStorage.setItem("ssmart-held-bills", JSON.stringify(updated)); } catch {}
+      return updated;
+    });
+    setShowHeldBills(false);
+    show(`Bill recalled (${held.cart.length} items)`, "info");
+  }
+
   const maxRedeemable = customer && shop?.loyaltyEnabled ? customer.loyaltyPoints : 0;
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
       if (isInputFocused()) return;
       if (e.key === "F5") { e.preventDefault(); resetSale(); show("Cart cleared", "info"); }
+      if (e.key === "F1") { e.preventDefault(); setShowHelpDialog(true); }
       if (e.key === "F6") { e.preventDefault(); const phone = posRef.current?.querySelector('input[placeholder*="Phone"]') as HTMLElement | null; if (phone) phone.focus(); }
       if (e.key === "F7") { e.preventDefault(); const disc = posRef.current?.querySelector('select[aria-label="Discount type"]') as HTMLElement | null; if (disc) disc.focus(); }
       if (e.key === "F12" || e.key === "End") { e.preventDefault(); if (canFinalize) setShowConfirmDialog(true); }
@@ -369,6 +552,14 @@ export default function PosPage() {
 
   return (
     <div ref={posRef} className="flex flex-col gap-4 h-full">
+      {/* Offline Banner */}
+      {!isOnline && (
+        <div className="flex items-center gap-2 rounded-xl border border-warning/30 bg-warning/10 px-4 py-2">
+          <WifiOff className="h-4 w-4 text-warning" />
+          <span className="text-sm font-medium text-warning">You are offline — sales will be saved locally and sync when connected</span>
+        </div>
+      )}
+
       {/* POS Header */}
       <div className="flex items-center justify-between rounded-xl border border-brand/20 bg-brand-light px-5 py-3">
         <div className="flex items-center gap-4">
@@ -395,12 +586,30 @@ export default function PosPage() {
           )}
           <button
             type="button"
+            onClick={holdBill}
+            disabled={cart.length === 0}
+            className="btn-touch flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-foreground hover:bg-surface-muted disabled:opacity-40"
+            title="Hold current bill and start a new one"
+          >
+            Hold Bill
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowHeldBills(true)}
+            disabled={heldBills.length === 0}
+            className="btn-touch flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-foreground hover:bg-surface-muted disabled:opacity-40"
+            title="Recall a held bill"
+          >
+            Recall ({heldBills.length})
+          </button>
+          <button
+            type="button"
             onClick={() => setShowShutdownDialog(true)}
             className="flex h-9 w-9 items-center justify-center rounded-lg text-text-secondary hover:bg-brand/10 hover:text-brand transition-colors"
             aria-label="Shutdown"
-            title="Shutdown (Ctrl+Q)"
+            title="End session & backup (Ctrl+Q)"
           >
-            <ScanBarcode className="h-5 w-5" />
+            <Power className="h-5 w-5" />
           </button>
         </div>
       </div>
@@ -477,6 +686,42 @@ export default function PosPage() {
         </Card>
       )}
 
+      {showHeldBills && (
+        <Card className="p-6 max-w-lg mx-auto animate-scale-in">
+          <h2 className="text-lg font-bold text-foreground mb-2">Recall Held Bill</h2>
+          <p className="text-sm text-text-secondary mb-4">Select a held bill to load it back into the cart.</p>
+          {heldBills.length === 0 ? (
+            <p className="py-6 text-center text-sm text-foreground/50">No held bills</p>
+          ) : (
+            <div className="flex flex-col gap-2 max-h-64 overflow-auto">
+              {heldBills.map((held) => {
+                const itemCount = held.cart.reduce((s, c) => s + c.quantity, 0);
+                const total = held.cart.reduce((s, c) => s + effectivePrice(c.product, c.rateTier) * c.quantity, 0);
+                return (
+                  <button
+                    key={held.id}
+                    type="button"
+                    onClick={() => recallBill(held.id)}
+                    className="flex items-center justify-between rounded-lg border border-border p-3 text-left hover:bg-surface-muted transition-colors"
+                  >
+                    <div>
+                      <p className="text-sm font-medium text-foreground">
+                        {held.customerName || "Walk-in"} · {itemCount} items
+                      </p>
+                      <p className="text-xs text-foreground/50">
+                        {new Date(held.timestamp).toLocaleTimeString()} · {money(total)}
+                      </p>
+                    </div>
+                    <span className="text-xs text-brand font-medium">Load</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          <Button type="button" variant="secondary" className="mt-4 w-full" onClick={() => setShowHeldBills(false)}>Cancel</Button>
+        </Card>
+      )}
+
       <BillConfirmDialog
         open={showConfirmDialog}
         total={collectTotal}
@@ -529,84 +774,90 @@ export default function PosPage() {
         </Card>
       )}
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3 flex-1 overflow-hidden">
+      {showHelpDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setShowHelpDialog(false)}>
+          <div className="w-full max-w-lg rounded-xl border border-border bg-surface p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center gap-3 mb-4">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-brand-light">
+                <HelpCircle className="h-5 w-5 text-brand" />
+              </div>
+              <h2 className="text-lg font-bold text-foreground">How to use POS</h2>
+            </div>
+            <div className="flex flex-col gap-3 text-sm text-foreground/80 max-h-[60vh] overflow-y-auto">
+              <Section title="Quick Sale">
+                <li>Scan a barcode or type a product name in the search box</li>
+                <li>Product is added to cart with quantity 1 — click qty to change</li>
+                <li>Press <Key>F12</Key> or <Key>End</Key> to open the checkout popup</li>
+                <li>Select payment method (Cash / UPI / Card), enter amount, confirm</li>
+              </Section>
+              <Section title="Customer & Loyalty">
+                <li>Press <Key>F6</Key> to jump to the customer phone field</li>
+                <li>Type a phone number and press the search icon to look up the customer</li>
+                <li>Loyalty points are earned automatically (10 points per ₹100)</li>
+                <li>Redeem points by entering a value — 1 point = ₹0.10 off</li>
+              </Section>
+              <Section title="Discount">
+                <li>Press <Key>F7</Key> to jump to the discount dropdown</li>
+                <li>Select <strong>%</strong> for percentage discount or <strong>₹</strong> for flat amount</li>
+                <li>Enter the discount value — it applies to the whole bill</li>
+              </Section>
+              <Section title="Split Payment">
+                <li>Click <strong>+ Split payment</strong> to add multiple payment methods</li>
+                <li>Example: ₹500 Cash + ₹200 UPI for a ₹700 bill</li>
+                <li>The system shows remaining amount and change due in real time</li>
+              </Section>
+              <Section title="Return / Exchange">
+                <li>In the Return section, type an invoice number and press search</li>
+                <li>Select items to return and enter quantities</li>
+                <li>Choose refund method: Cash, UPI, or store credit</li>
+                <li>Returns can be combined with a new sale in the same transaction</li>
+              </Section>
+              <Section title="Keyboard Shortcuts">
+                <li><Key>F1</Key> Show this help</li>
+                <li><Key>F5</Key> Clear cart / start new sale</li>
+                <li><Key>F6</Key> Focus customer phone field</li>
+                <li><Key>F7</Key> Focus discount field</li>
+                <li><Key>F12</Key> / <Key>End</Key> Open checkout</li>
+                <li><Key>Ctrl+Space</Key> Focus search bar</li>
+                <li><Key>Esc</Key> Close popups</li>
+              </Section>
+            </div>
+            <Button type="button" variant="secondary" className="mt-4 w-full" onClick={() => setShowHelpDialog(false)}>Got it</Button>
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_340px] flex-1 overflow-hidden">
         {/* Cart */}
-        <Card className="p-4 lg:col-span-2 flex flex-col overflow-hidden">
+        <Card className="p-4 flex flex-col overflow-hidden">
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-base font-semibold text-foreground">Cart</h2>
-            <span className="text-xs text-text-tertiary">Click qty to edit · Del to remove</span>
+            <h2 className="text-base font-semibold text-foreground">Billing</h2>
+            <span className="text-xs text-text-tertiary">Scan barcode or search to add items</span>
           </div>
 
-          <div className="relative mb-3">
-            <div className="flex items-center gap-2 rounded-xl border border-border bg-surface-muted/50 px-3 py-2.5 focus-within:border-brand focus-within:ring-2 focus-within:ring-brand/20 transition-all">
-              <ScanBarcode className="h-4 w-4 shrink-0 text-text-tertiary" />
-              <input
-                ref={qtyInputRef}
-                type="text"
-                value={manualQuery}
-                onChange={(e) => setManualQuery(e.target.value)}
-                placeholder="Scan barcode or type product name…"
-                aria-label="Add product manually"
-                className="w-full bg-transparent text-sm text-foreground outline-none placeholder:text-text-tertiary"
-              />
-              {manualQuery && (
-                <button type="button" aria-label="Clear search" onClick={() => setManualQuery("")} className="text-foreground/40 hover:text-foreground">
-                  <X className="h-4 w-4" aria-hidden="true" />
-                </button>
-              )}
-            </div>
-            {committedQuery && (
-              <div className="absolute z-20 mt-1 max-h-64 w-full overflow-auto rounded-xl border border-border bg-surface shadow-xl animate-scale-in">
-                {!manualResults ? (
-                  <p className="px-3 py-2.5 text-sm text-foreground/50">Searching\u2026</p>
-                ) : manualResults.length === 0 ? (
-                  <p className="px-3 py-2.5 text-sm text-foreground/50">No products match.</p>
-                ) : (
-                  manualResults.slice(0, 8).map((p) => {
-                    const outOfStock = p.stock <= 0 && !shop?.allowNegativeStock;
-                    return (
-                      <button
-                        key={p.id}
-                        type="button"
-                        disabled={outOfStock}
-                        onClick={() => { addToCart(p); setManualQuery(""); setCommittedQuery(""); }}
-                        className="flex w-full items-center justify-between gap-3 border-b border-border px-3 py-2.5 text-left text-sm last:border-b-0 hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        <span className="min-w-0 flex-1 truncate font-medium text-foreground">
-                          {p.name}
-                          {p.barcode && <span className="ml-1.5 font-normal text-foreground/40">\u00b7 {p.barcode}</span>}
-                        </span>
-                        <span className="shrink-0 text-foreground/70">{money(effectivePrice(p))}</span>
-                        <span className={`shrink-0 text-xs ${outOfStock ? "text-danger" : "text-foreground/40"}`}>
-                          {outOfStock ? "Out of stock" : `${p.stock} in stock`}
-                        </span>
-                      </button>
-                    );
-                  })
-                )}
-              </div>
-            )}
-          </div>
+          <ProductSearch onAddToCart={addToCart} />
 
           {cart.length === 0 ? (
             <div className="flex flex-1 flex-col items-center justify-center py-12 text-center">
               <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-brand-light text-brand mb-4">
                 <ScanBarcode className="h-8 w-8" />
               </div>
-              <p className="text-base font-medium text-foreground">Cart is empty</p>
-              <p className="text-sm text-text-tertiary mt-1">Scan a product or type to search</p>
+              <p className="text-base font-medium text-foreground">No items in bill</p>
+              <p className="text-sm text-text-tertiary mt-1">Use the search bar above to add products</p>
             </div>
           ) : (
             <div className="flex-1 overflow-auto">
               <table className="w-full min-w-max text-left text-sm">
                 <thead>
                   <tr className="border-b border-border text-xs uppercase tracking-wider text-text-tertiary">
-                    <th className="pb-2 pr-2 font-semibold">Item</th>
-                    <th className="pb-2 pr-2 font-semibold">MRP</th>
-                    <th className="pb-2 pr-2 font-semibold">Sell @</th>
-                    <th className="pb-2 pr-2 font-semibold">Qty</th>
-                    {shop?.gstEnabled && <th className="pb-2 pr-2 text-right font-semibold">GST</th>}
-                    <th className="pb-2 pr-2 text-right font-semibold">Total</th>
+                    <th className="pb-2 pr-2 font-semibold">#</th>
+                    <th className="pb-2 pr-2 font-semibold">Item Name</th>
+                    <th className="pb-2 pr-2 text-right font-semibold">MRP</th>
+                    <th className="pb-2 pr-2 font-semibold">Price</th>
+                    <th className="pb-2 pr-2 text-right font-semibold">Qty</th>
+                    <th className="pb-2 pr-2 font-semibold">Disc</th>
+                    {shop?.gstEnabled && <th className="pb-2 pr-2 text-right font-semibold">GST%</th>}
+                    <th className="pb-2 pr-2 text-right font-semibold">Amount</th>
                     <th className="pb-2" />
                   </tr>
                 </thead>
@@ -615,15 +866,41 @@ export default function PosPage() {
                     <tr
                       key={item.product.id}
                       className={`transition-colors hover:bg-surface-muted/50 ${focusedCartIndex === idx ? "bg-brand/5" : ""}`}
+                      onClick={() => setFocusedCartIndex(idx)}
                     >
-                      <td className="py-2 pr-2 font-medium text-foreground max-w-[180px] truncate">
+                      <td className="py-2 pr-2 text-xs text-foreground/40">{idx + 1}</td>
+                      <td className="py-2 pr-2 font-medium text-foreground max-w-[200px] truncate">
                         {item.product.name}
                         {item.product.unit && <span className="ml-1.5 font-normal text-foreground/40">({item.product.unit})</span>}
                       </td>
-                      <td className="py-2 pr-2 text-foreground/50 text-xs">{money(item.product.purchasePrice)}</td>
-                      <td className="py-2 pr-2 text-foreground/70 text-sm">{money(effectivePrice(item.product))}</td>
+                      <td className="py-2 pr-2 text-right text-foreground/50 text-xs">
+                        {(item.product.mrp || item.product.sellingPrice) > effectivePrice(item.product, item.rateTier) ? (
+                          <span className="line-through">{money(item.product.mrp || item.product.sellingPrice)}</span>
+                        ) : (
+                          money(item.product.mrp || item.product.sellingPrice)
+                        )}
+                      </td>
+                      <td className="py-2 pr-1">
+                        <select
+                          value={item.rateTier || ""}
+                          onChange={(e) => {
+                            const val = e.target.value || null;
+                            setCartRateTier(item.product.id, val as "A" | "B" | "C" | null);
+                          }}
+                          className="w-20 rounded border border-border bg-surface px-1.5 py-0.5 text-xs text-foreground font-medium"
+                          title="Select price: MRP, Wholesale, Retail, or Special"
+                        >
+                          <option value="">MRP</option>
+                          {item.product.rateA != null && item.product.rateA > 0 && <option value="A">Wholesale</option>}
+                          {item.product.rateB != null && item.product.rateB > 0 && <option value="B">Retail</option>}
+                          {item.product.rateC != null && item.product.rateC > 0 && <option value="C">Special</option>}
+                        </select>
+                      </td>
+                      <td className="py-2 pr-2 text-right font-medium text-foreground">
+                        {money(effectivePrice(item.product, item.rateTier))}
+                      </td>
                       <td className="py-2 pr-2">
-                        <div className="flex items-center gap-1">
+                        <div className="flex items-center justify-end gap-1">
                           <QuantityPopover
                             product={item.product}
                             quantity={item.quantity}
@@ -631,19 +908,46 @@ export default function PosPage() {
                           />
                         </div>
                       </td>
+                      <td className="py-2 pr-1">
+                        <div className="flex items-center gap-0.5">
+                          <select
+                            value={item.discountType || ""}
+                            onChange={(e) => {
+                              const dt = (e.target.value || null) as "percent" | "amount" | null;
+                              setCartItemDiscount(item.product.id, dt, item.discountValue);
+                            }}
+                            className="h-6 rounded border border-border bg-surface px-0.5 text-[10px] text-foreground"
+                            title="Discount type"
+                          >
+                            <option value="">--</option>
+                            <option value="percent">%</option>
+                            <option value="amount">{sym}</option>
+                          </select>
+                          <input
+                            type="number"
+                            min={0}
+                            step={0.01}
+                            value={item.discountValue || ""}
+                            onChange={(e) => setCartItemDiscount(item.product.id, item.discountType, Number(e.target.value) || 0)}
+                            disabled={!item.discountType}
+                            className="h-6 w-12 rounded border border-border bg-surface px-1 text-[10px] text-right text-foreground disabled:opacity-40"
+                            title="Discount value"
+                          />
+                        </div>
+                      </td>
                       {shop?.gstEnabled && (
                         <td className="py-2 pr-2 text-right text-foreground/50">{item.product.taxRate}%</td>
                       )}
-                      <td className="py-2 pr-2 text-right font-medium text-foreground">
-                        {money(effectivePrice(item.product) * item.quantity)}
+                      <td className="py-2 pr-2 text-right font-semibold text-foreground">
+                        {money(round2(effectivePrice(item.product, item.rateTier) * item.quantity * (1 - (item.discountType === "percent" ? (item.discountValue || 0) / 100 : 0)) - (item.discountType === "amount" ? item.discountValue || 0 : 0)))}
                       </td>
                       <td className="py-2 text-right">
                         <button
                           type="button"
-                          aria-label={`Remove ${item.product.name} entirely`}
+                          aria-label={`Remove ${item.product.name}`}
                           onClick={() => removeFromCart(item.product.id)}
                           className="text-foreground/40 hover:text-danger transition-colors"
-                          title="Remove item (Del)"
+                          title="Remove item"
                         >
                           <Trash2 className="h-4 w-4" aria-hidden="true" />
                         </button>
@@ -654,13 +958,138 @@ export default function PosPage() {
               </table>
             </div>
           )}
+
+          {/* Product Info Panel — shows details of selected item (like MARG) */}
+          {focusedCartIndex !== null && cart[focusedCartIndex] && (
+            <div className="mt-2 rounded-lg border border-brand/20 bg-brand/5 p-3">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-xs font-semibold text-brand uppercase">Selected Item Details</h3>
+                <button type="button" onClick={() => setFocusedCartIndex(null)} className="text-foreground/40 hover:text-foreground">
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              {(() => {
+                const p = cart[focusedCartIndex].product;
+                const item = cart[focusedCartIndex];
+                const ep = effectivePrice(p, item.rateTier);
+                const lineTotal = ep * item.quantity;
+                return (
+                  <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3 text-xs">
+                    <div>
+                      <span className="text-foreground/50">Product</span>
+                      <p className="font-medium text-foreground truncate">{p.name}</p>
+                    </div>
+                    <div>
+                      <span className="text-foreground/50">Barcode</span>
+                      <p className="font-mono text-foreground">{p.barcode || "—"}</p>
+                    </div>
+                    <div>
+                      <span className="text-foreground/50">MRP</span>
+                      <p className="font-medium text-foreground">{money(p.mrp || p.sellingPrice)}</p>
+                    </div>
+                    <div>
+                      <span className="text-foreground/50">Our Price</span>
+                      <p className="font-medium text-success">{money(ep)}</p>
+                    </div>
+                    {p.category && (
+                      <div>
+                        <span className="text-foreground/50">Category</span>
+                        <p className="text-foreground">{p.category}</p>
+                      </div>
+                    )}
+                    {p.hsn && (
+                      <div>
+                        <span className="text-foreground/50">HSN Code</span>
+                        <p className="font-mono text-foreground">{p.hsn}</p>
+                      </div>
+                    )}
+                    {shop?.gstEnabled && (
+                      <div>
+                        <span className="text-foreground/50">GST Rate</span>
+                        <p className="text-foreground">{p.taxRate}%</p>
+                      </div>
+                    )}
+                    <div>
+                      <span className="text-foreground/50">Stock</span>
+                      <p className={`font-medium ${p.stock <= 0 ? "text-danger" : p.stock <= 5 ? "text-warning" : "text-foreground"}`}>
+                        {p.stock} {p.unit || "units"}
+                      </p>
+                    </div>
+                    <div>
+                      <span className="text-foreground/50">Cost Price</span>
+                      <p className="text-foreground">{money(p.purchasePrice)}</p>
+                      {p.purchasePrice > 0 && ep > p.purchasePrice && (
+                        <p className="text-[10px] text-success">Margin: {((ep - p.purchasePrice) / ep * 100).toFixed(1)}%</p>
+                      )}
+                      {p.purchasePrice > 0 && ep < p.purchasePrice && (
+                        <p className="text-[10px] text-danger">LOSS: -{((p.purchasePrice - ep) / p.purchasePrice * 100).toFixed(1)}%</p>
+                      )}
+                    </div>
+                    <div>
+                      <span className="text-foreground/50">Quantity</span>
+                      <p className="font-medium text-foreground">{item.quantity}</p>
+                    </div>
+                    <div>
+                      <span className="text-foreground/50">Line Total</span>
+                      <p className="font-bold text-foreground">{money(lineTotal)}</p>
+                    </div>
+                    {p.discountType && p.discountValue > 0 && (
+                      <div>
+                        <span className="text-foreground/50">Standing Discount</span>
+                        <p className="text-success">
+                          {p.discountType === "percent" ? `${p.discountValue}% off` : `${money(p.discountValue)} off`}
+                        </p>
+                      </div>
+                    )}
+                    {p.unit && (
+                      <div>
+                        <span className="text-foreground/50">Unit</span>
+                        <p className="text-foreground">{p.unit}</p>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+
+          {/* Last 4 Deals — shows recent sale rates for the selected product */}
+          {focusedCartIndex !== null && cart[focusedCartIndex] && (
+            <LastDeals productId={cart[focusedCartIndex].product.id} sym={sym} />
+          )}
+
+          {/* Bill Summary Bar — always visible when cart has items */}
+          {cart.length > 0 && (
+            <div className="mt-3 rounded-lg border border-border bg-surface-muted/50 p-3">
+              <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
+                <span className="text-foreground/60">Items: <strong className="text-foreground">{cart.reduce((s, c) => s + c.quantity, 0)}</strong></span>
+                <span className="text-foreground/60">Subtotal: <strong className="text-foreground">{money(quote.subtotal)}</strong></span>
+                {quote.discountAmount > 0 && (
+                  <span className="text-success">Discount: <strong>-{money(quote.discountAmount)}</strong></span>
+                )}
+                {shop?.gstEnabled && quote.taxAmount > 0 && (
+                  <span className="text-foreground/60">GST (incl.): <strong className="text-foreground">{money(quote.taxAmount)}</strong></span>
+                )}
+                {quote.loyaltyDiscount > 0 && (
+                  <span className="text-success">Loyalty: <strong>-{money(quote.loyaltyDiscount)}</strong></span>
+                )}
+                {returnTotal > 0 && (
+                  <span className="text-success">Returns: <strong>-{money(returnTotal)}</strong></span>
+                )}
+                {creditUse > 0 && (
+                  <span className="text-success">Credit: <strong>-{money(creditUse)}</strong></span>
+                )}
+                <span className="ml-auto text-base font-bold text-brand">Total: {money(collectTotal)}</span>
+              </div>
+            </div>
+          )}
         </Card>
 
         {/* Checkout panel */}
         <div className="flex flex-col gap-3 overflow-y-auto">
           {/* Customer */}
           <Card className="flex flex-col gap-3 p-4">
-            <h2 className="text-base font-semibold text-foreground">Customer [F6]</h2>
+            <h2 className="text-base font-semibold text-foreground">Customer</h2>
             <div className="flex items-end gap-2">
               <div className="flex-1">
                 <Field label="Phone" value={customerPhone} onChange={(e) => { setCustomerPhone(e.target.value); setCustomer(null); setPointsRedeemed(0); }} placeholder="For loyalty" />
@@ -713,9 +1142,24 @@ export default function PosPage() {
             )}
           </Card>
 
+          {/* Salesman */}
+          <Card className="flex flex-col gap-3 p-4">
+            <h2 className="text-base font-semibold text-foreground">Salesman</h2>
+            <select
+              className="rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground"
+              value={salesmanId ?? ""}
+              onChange={(e) => setSalesmanId(e.target.value ? Number(e.target.value) : null)}
+            >
+              <option value="">No salesman</option>
+              {salesmen.filter(s => s.active).map(s => (
+                <option key={s.id} value={s.id}>{s.name} ({s.code})</option>
+              ))}
+            </select>
+          </Card>
+
           {/* Returns / exchange */}
           <Card className="flex flex-col gap-3 p-4">
-            <h2 className="text-base font-semibold text-foreground">Return / Exchange [F9]</h2>
+            <h2 className="text-base font-semibold text-foreground">Return / Exchange</h2>
             <ReturnPanel sym={sym} drafted={returnLines} onAdd={(lines) => setReturnLines((prev) => [...prev, ...lines])} onInvoiceFound={onReturnInvoiceFound} />
             {returnLines.length > 0 && (
               <div className="flex flex-col gap-1.5 border-t border-border pt-3">
@@ -732,7 +1176,7 @@ export default function PosPage() {
 
           {/* Discount + payment */}
           <Card className="flex flex-col gap-3 p-4">
-            <h2 className="text-base font-semibold text-foreground">Discount [F7]</h2>
+            <h2 className="text-base font-semibold text-foreground">Bill Discount</h2>
             <div className="flex gap-2">
               <select aria-label="Discount type" value={discountType ?? ""} onChange={(e) => setDiscountType((e.target.value || null) as "percent" | "amount" | null)} className="rounded-lg border border-border bg-surface px-3 py-2.5 text-sm text-foreground">
                 <option value="">None</option>
@@ -742,7 +1186,7 @@ export default function PosPage() {
               <input type="number" min={0} step="0.01" disabled={!discountType} value={discountValue || ""} onChange={(e) => setDiscountValue(Number(e.target.value) || 0)} placeholder="Discount value" aria-label="Discount value" className="w-full rounded-lg border border-border bg-surface px-3 py-2.5 text-sm text-foreground disabled:opacity-50" />
             </div>
 
-            <h2 className="mt-2 text-base font-semibold text-foreground">Payment</h2>
+            <h2 className="mt-2 text-base font-semibold text-foreground">Payment Method</h2>
             <div className="flex flex-col gap-2">
               {payments.map((line, idx) => (
                 <div key={idx} className="flex items-end gap-2">
@@ -821,14 +1265,14 @@ export default function PosPage() {
               const adjusted = returnTotal > 0 || creditUse > 0 || dueToClear > 0 || (discountType && discountValue > 0);
               return (
                 <>
-                  <Row label={adjusted ? "This sale" : "Subtotal"} value={money(adjusted ? quote.total : quote.subtotal)} />
-                  {quote.discountAmount > 0 && <Row label="Discount" value={`- ${money(quote.discountAmount)}`} />}
-                  {!adjusted && shop?.gstEnabled && quote.taxAmount > 0 && <Row label="GST (included)" value={money(quote.taxAmount)} />}
-                  {!adjusted && quote.loyaltyDiscount > 0 && <Row label="Loyalty" value={`- ${money(quote.loyaltyDiscount)}`} />}
+                  <Row label="Subtotal (MRP)" value={money(quote.subtotal)} />
+                  {quote.discountAmount > 0 && <Row label="Bill Discount" value={`- ${money(quote.discountAmount)}`} />}
+                  {shop?.gstEnabled && quote.taxAmount > 0 && <Row label="GST (included in price)" value={money(quote.taxAmount)} />}
+                  {quote.loyaltyDiscount > 0 && <Row label="Loyalty Points Used" value={`- ${money(quote.loyaltyDiscount)}`} />}
                   {returnTotal > 0 && <Row label="Returns" value={`- ${money(returnTotal)}`} />}
-                  {creditUse > 0 && <Row label="Store credit used" value={`- ${money(creditUse)}`} />}
+                  {creditUse > 0 && <Row label="Store Credit Used" value={`- ${money(creditUse)}`} />}
                   {dueToClear > 0 && (
-                    <Row label={duePaidFinal < dueToClear ? "Due to clear (needs full payment)" : "Previous due cleared"} value={money(duePaidFinal)} />
+                    <Row label={duePaidFinal < dueToClear ? "Previous Due (part)" : "Previous Due Cleared"} value={money(duePaidFinal)} />
                   )}
                 </>
               );
@@ -841,15 +1285,15 @@ export default function PosPage() {
               </div>
             ) : (
               <div className="flex items-center justify-between rounded-xl border border-brand/20 bg-brand-light px-4 py-3 -mx-1">
-                <span className="text-sm font-semibold text-brand">{returnTotal > 0 || creditUse > 0 || dueToClear > 0 ? "To Collect" : "Grand Total"}</span>
+                <span className="text-sm font-semibold text-brand">{returnTotal > 0 || creditUse > 0 || dueToClear > 0 ? "Amount to Collect" : "Grand Total"}</span>
                 <span className="text-2xl font-bold text-brand">{money(collectTotal)}</span>
               </div>
             )}
-            {changeDue > 0 && (<Row label="Change" value={money(changeDue)} />)}
-            {shortNow > 0 && (<p className={`rounded-lg px-3 py-2 text-xs font-medium ${customer ? "bg-warning/10 text-warning" : "bg-danger/10 text-danger"}`}>{customer ? `${money(shortNow)} short \u2014 unpaid part stays on ${customer.name}'s due` : `${money(shortNow)} short \u2014 add a customer to record as due`}</p>)}
-            {shop?.loyaltyEnabled && customer && quote.pointsEarned > 0 && (<p className="text-xs text-foreground/50">Earns {quote.pointsEarned} points</p>)}
-            <Button onClick={() => setShowConfirmDialog(true)} disabled={!canFinalize || isCheckingOut} className="mt-2 w-full" size="lg">
-              {isCheckingOut ? "Processing…" : "END SALE [F12]"}
+            {changeDue > 0 && (<Row label="Return Change" value={money(changeDue)} />)}
+            {shortNow > 0 && (<p className={`rounded-lg px-3 py-2 text-xs font-medium ${customer ? "bg-warning/10 text-warning" : "bg-danger/10 text-danger"}`}>{customer ? `${money(shortNow)} short — unpaid part stays on ${customer.name}'s due` : `${money(shortNow)} short — add a customer to record as due`}</p>)}
+            {shop?.loyaltyEnabled && customer && quote.pointsEarned > 0 && (<p className="text-xs text-foreground/50">Earns {quote.pointsEarned} loyalty points</p>)}
+            <Button onClick={() => setShowConfirmDialog(true)} disabled={!canFinalize || isCheckingOut} className="btn-touch mt-2 w-full" size="lg">
+              {isCheckingOut ? "Processing..." : "COMPLETE SALE"}
             </Button>
           </Card>
         </div>
@@ -863,6 +1307,42 @@ function Row({ label, value }: { label: string; value: string }) {
     <div className="flex items-center justify-between text-sm">
       <span className="text-foreground/60">{label}</span>
       <span className="text-foreground">{value}</span>
+    </div>
+  );
+}
+
+function Key({ children }: { children: React.ReactNode }) {
+  return <kbd className="inline-block rounded border border-border bg-surface-muted px-1.5 py-0.5 text-[11px] font-mono font-semibold text-foreground/70">{children}</kbd>;
+}
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <p className="text-xs font-semibold uppercase tracking-wider text-text-secondary mb-1">{title}</p>
+      <ul className="list-disc list-inside space-y-0.5 text-[13px] text-foreground/70">{children}</ul>
+    </div>
+  );
+}
+
+function LastDeals({ productId, sym }: { productId: number; sym: string }) {
+  const { data: deals = [] } = useQuery<{ rate: number; discountType: string | null; discountValue: number; quantity: number; date: string; invoiceNumber: string; customerName: string }[]>({
+    queryKey: ["last-deals", productId],
+    queryFn: () => api.get(`/products/${productId}/last-deals?limit=4`),
+    staleTime: 30_000,
+  });
+  if (deals.length === 0) return null;
+  return (
+    <div className="mt-2 rounded-lg border border-border bg-surface-muted p-3">
+      <h3 className="text-xs font-semibold uppercase tracking-wider text-foreground/50 mb-2">Last Sale Rates</h3>
+      <div className="grid grid-cols-4 gap-2 text-xs">
+        {deals.map((d, i) => (
+          <div key={i} className="rounded bg-surface p-2 text-center">
+            <p className="font-bold text-foreground">{sym}{d.rate.toFixed(2)}</p>
+            <p className="text-foreground/50 mt-0.5">Qty: {d.quantity}</p>
+            <p className="text-foreground/40 text-[10px] truncate" title={d.customerName}>{d.customerName}</p>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

@@ -1,51 +1,51 @@
 // Pure pricing math for a sale. Kept separate from the route so it can be
 // reasoned about and unit-tested in isolation.
 //
-// Model:
-//   - `sellingPrice` is the product's MRP. Under India's Legal Metrology
-//     (Packaged Commodities) Rules, MRP is legally required to be
-//     GST-INCLUSIVE — a retailer cannot charge above MRP, and GST is a
-//     component of it, not an amount added on top. So the price entered on
-//     a product is what the customer pays per unit; GST is backed OUT of
-//     it for display/compliance (CGST/SGST breakup), never added on.
-//   - A product may carry a standing discount (a markdown set on the
-//     product itself, either a percent or a flat currency amount) —
-//     applied first, so the line's effective MRP is already discounted
-//     before anything else happens.
-//   - Each line has a base = effective MRP * quantity (still tax-inclusive).
-//   - An order-level manual discount (from the POS discount field) is
-//     applied to the inclusive subtotal, then prorated across lines by
-//     their share of the subtotal — same proration design as before, just
-//     operating on inclusive amounts throughout instead of exclusive ones.
-//   - GST (CGST/SGST) shown on the receipt is backed out of each line's
-//     post-discount inclusive amount using that line's own rate, purely
-//     for the legally-required tax breakup — it does NOT get added to
-//     reach the total, because it was never excluded from `sellingPrice`
-//     in the first place.
-//   - Loyalty points redeemed convert to a further cash discount at
-//     settings.pointValue, capped so the total never goes below zero.
-//   - Points earned accrue on the final payable amount.
+// Price model:
+//   - `mrp` = Maximum Retail Price (legal ceiling, GST-inclusive, printed on label)
+//   - `sellingPrice` = Our actual selling price (GST-inclusive, must be <= MRP)
+//   - `purchasePrice` = Cost price from supplier
+//   - Rate tiers (A/B/C) override sellingPrice for specific customer types
+//   - GST is backed OUT of the inclusive price for display, never added on top
 
 function round2(n) {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 
-// A product's own standing discount (set in Inventory) — either a percent
-// or a flat currency amount off its MRP. Shared with frontend/lib/quote.ts,
-// which must compute this identically for the POS live-preview to match.
-function effectivePrice(product) {
+// Returns the effective unit price for a product given a rate tier.
+// Priority: rate tier > sellingPrice (our price) > MRP (ceiling)
+// The result is always GST-inclusive and must never exceed MRP.
+function effectivePrice(product, rateTier) {
+  // Start with our selling price as default
+  let basePrice = product.sellingPrice;
+
+  // Override with rate tier if set
+  if (rateTier === 'A' && product.rateA != null && product.rateA > 0) basePrice = product.rateA;
+  else if (rateTier === 'B' && product.rateB != null && product.rateB > 0) basePrice = product.rateB;
+  else if (rateTier === 'C' && product.rateC != null && product.rateC > 0) basePrice = product.rateC;
+
+  // Apply standing discount (from product master) on top of the selected rate
   const { discountType, discountValue } = product;
-  if (!discountType || !discountValue) return product.sellingPrice;
-  if (discountType === 'percent') {
-    const pct = Math.min(100, Math.max(0, discountValue));
-    return round2(product.sellingPrice * (1 - pct / 100));
+  if (discountType && discountValue) {
+    if (discountType === 'percent') {
+      const pct = Math.min(100, Math.max(0, discountValue));
+      basePrice = round2(basePrice * (1 - pct / 100));
+    } else {
+      const amt = Math.min(basePrice, Math.max(0, discountValue));
+      basePrice = round2(basePrice - amt);
+    }
   }
-  const amt = Math.min(product.sellingPrice, Math.max(0, discountValue));
-  return round2(product.sellingPrice - amt);
+
+  // Safety: never exceed MRP (legal requirement in India)
+  if (product.mrp && product.mrp > 0 && basePrice > product.mrp) {
+    basePrice = product.mrp;
+  }
+
+  return basePrice;
 }
 
 /**
- * @param {Array<{product, quantity}>} lines  product = catalog row (authoritative price/tax)
+ * @param {Array<{product, quantity, rateTier?, discountType?, discountValue?}>} lines
  * @param {object} opts { discountType, discountValue, pointsRedeemed, settings }
  * @returns computed invoice fields + per-line breakdown
  */
@@ -54,16 +54,24 @@ function computeSale(lines, opts) {
 
   const gstEnabled = !!settings?.gstEnabled;
 
-  const effectivePrices = lines.map((l) => effectivePrice(l.product));
-  // MRP-inclusive line totals — this IS what the customer pays before any
-  // order-level discount, not a pre-tax figure to add GST onto.
-  const bases = lines.map((l, i) => round2(effectivePrices[i] * l.quantity));
+  // Step 1: Get effective price per unit (our price/rate minus standing product discount)
+  const effectivePrices = lines.map((l) => effectivePrice(l.product, l.rateTier));
+
+  // Step 2: Apply per-item discount (from cart) on each line
+  const bases = lines.map((l, i) => {
+    const lineBase = round2(effectivePrices[i] * l.quantity);
+    if (!l.discountType || !l.discountValue) return lineBase;
+    let itemDiscount = 0;
+    if (l.discountType === 'percent') {
+      itemDiscount = round2(lineBase * (Math.min(l.discountValue, 100) / 100));
+    } else {
+      itemDiscount = round2(Math.min(l.discountValue, lineBase));
+    }
+    return round2(lineBase - itemDiscount);
+  });
   const subtotal = round2(bases.reduce((a, b) => a + b, 0));
 
-  // Manual order-level discount, taken off the inclusive subtotal — this
-  // way both "% off" and a flat "amount off" mean exactly what a cashier
-  // and customer expect: a discount off the ticket price, not off some
-  // internal tax-exclusive figure the customer never sees.
+  // Step 3: Apply bill-level discount
   let discountAmount = 0;
   if (discountType === 'percent') {
     discountAmount = round2(subtotal * (Math.min(discountValue, 100) / 100));
@@ -72,24 +80,26 @@ function computeSale(lines, opts) {
   }
   discountAmount = Math.max(0, Math.min(discountAmount, subtotal));
 
-  // Prorate the discount, then back GST out of each line's post-discount
-  // inclusive amount (informational — it's a component, not an addition).
+  // Step 4: Calculate tax (backed out of inclusive price)
   const items = lines.map((l, i) => {
     const base = bases[i];
     const share = subtotal > 0 ? base / subtotal : 0;
     const lineDiscount = round2(discountAmount * share);
-    const discountedBase = round2(base - lineDiscount); // still inclusive — the actual line charge
+    const discountedBase = round2(base - lineDiscount);
     const rate = gstEnabled ? l.product.taxRate || 0 : 0;
     const taxAmount = rate > 0 ? round2(discountedBase - discountedBase / (1 + rate / 100)) : 0;
     return {
       productId: l.product.id,
       name: l.product.name,
       unit: l.product.unit || null,
+      rateTier: l.rateTier || null,
+      discountType: l.discountType || null,
+      discountValue: l.discountValue || 0,
       quantity: l.quantity,
       price: effectivePrices[i],
       taxRate: rate,
       taxAmount,
-      total: discountedBase, // inclusive — GST is already inside this, not added to it
+      total: discountedBase,
     };
   });
 
@@ -122,4 +132,4 @@ function computeSale(lines, opts) {
   };
 }
 
-module.exports = { computeSale, round2 };
+module.exports = { computeSale, round2, effectivePrice };

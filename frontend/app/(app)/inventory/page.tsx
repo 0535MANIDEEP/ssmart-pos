@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Barcode as BarcodeIcon, PackagePlus, Pencil, Plus, ScanBarcode, Search, Trash2 } from "lucide-react";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -9,12 +10,13 @@ import { StockAdjustModal } from "@/components/StockAdjustModal";
 import { BarcodeLabelModal } from "@/components/BarcodeLabelModal";
 import { useBarcodeScanner } from "@/hooks/useBarcodeScanner";
 import { useDeleteProduct, useProducts } from "@/hooks/useProducts";
+import { SkeletonTable } from "@/components/ui/Skeleton";
 import { useShopSettings } from "@/hooks/useShopSettings";
 import { useToast } from "@/components/Toast";
-import { api, ApiError } from "@/lib/api";
+import { api, ApiError, describeApiError } from "@/lib/api";
 import { formatMoney } from "@/lib/format";
 import { effectivePrice } from "@/lib/quote";
-import type { Product } from "@/lib/types";
+import type { Product, Packing } from "@/lib/types";
 
 type ModalState = { mode: "add"; initialBarcode?: string } | { mode: "edit"; product: Product } | null;
 
@@ -25,6 +27,11 @@ export default function InventoryPage() {
   const [labelTarget, setLabelTarget] = useState<Product | null>(null);
   const { data: shop } = useShopSettings();
   const { data: products, isLoading } = useProducts(search);
+  const { data: packings = [] } = useQuery<Packing[]>({
+    queryKey: ["packings"],
+    queryFn: () => api.get<Packing[]>("/packing"),
+    enabled: true,
+  });
   const deleteProduct = useDeleteProduct();
   const { show } = useToast();
 
@@ -53,7 +60,7 @@ export default function InventoryPage() {
       await deleteProduct.mutateAsync(product.id);
       show("Product deleted", "success");
     } catch (err) {
-      show(err instanceof ApiError ? err.message : "Could not delete product", "error");
+      show(describeApiError(err, "Could not delete product"), "error");
     }
   }
 
@@ -87,7 +94,7 @@ export default function InventoryPage() {
         </div>
 
         {isLoading ? (
-          <p className="py-10 text-center text-sm text-foreground/50">Loading products…</p>
+          <SkeletonTable rows={8} cols={6} />
         ) : !products || products.length === 0 ? (
           <p className="py-10 text-center text-sm text-foreground/50">
             No products yet. Scan a barcode or click &quot;Add product&quot; to start.
@@ -102,14 +109,21 @@ export default function InventoryPage() {
                   <th className="py-2 pr-4">Category</th>
                   {shop?.gstEnabled && <th className="py-2 pr-4 text-right">GST</th>}
                   <th className="py-2 pr-4 text-right">Cost</th>
-                  <th className="py-2 pr-4 text-right">Price</th>
+                  <th className="py-2 pr-4 text-right">MRP</th>
+                  <th className="py-2 pr-4 text-right text-brand">Wholesale</th>
+                  <th className="py-2 pr-4 text-right text-brand">Retail</th>
+                  <th className="py-2 pr-4 text-right text-brand">Special</th>
                   <th className="py-2 pr-4 text-right">Stock</th>
+                  <th className="py-2 pr-4 text-right">Pack</th>
                   <th className="py-2" />
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
                 {products.map((product) => {
-                  const low = product.stock <= lowStockThreshold;
+                  const reorderThreshold = product.minStock > 0 ? product.minStock : lowStockThreshold;
+                  const low = product.stock <= reorderThreshold;
+                  const expired = product.expiryDate && new Date(product.expiryDate) < new Date();
+                  const expiringSoon = product.expiryDate && !expired && new Date(product.expiryDate).getTime() - Date.now() < 30 * 24 * 60 * 60 * 1000;
                   return (
                     <tr key={product.id}>
                       <td className="py-2.5 pr-4">
@@ -121,6 +135,9 @@ export default function InventoryPage() {
                           {product.name}
                         </button>
                         {product.unit && <span className="ml-1.5 text-xs text-foreground/40">({product.unit})</span>}
+                        {expired && <span className="ml-1.5 rounded-full bg-danger/10 px-1.5 py-0.5 text-[10px] font-semibold text-danger">EXPIRED</span>}
+                        {expiringSoon && !expired && <span className="ml-1.5 rounded-full bg-warning/10 px-1.5 py-0.5 text-[10px] font-semibold text-warning">EXPIRING</span>}
+                        {product.batchNumber && <span className="ml-1.5 text-[10px] text-foreground/30">Batch: {product.batchNumber}</span>}
                       </td>
                       <td className="py-2.5 pr-4 font-mono text-xs text-foreground/60">{product.barcode}</td>
                       <td className="py-2.5 pr-4 text-foreground/60">{product.category || "—"}</td>
@@ -128,6 +145,7 @@ export default function InventoryPage() {
                         <td className="py-2.5 pr-4 text-right text-foreground/60">{product.taxRate}%</td>
                       )}
                       <td className="py-2.5 pr-4 text-right text-foreground/70">{money(product.purchasePrice)}</td>
+                      <td className="py-2.5 pr-4 text-right text-foreground/70">{money(product.mrp || product.sellingPrice)}</td>
                       <td className="py-2.5 pr-4 text-right text-foreground/70">
                         {product.discountType && product.discountValue > 0 ? (
                           <>
@@ -137,6 +155,25 @@ export default function InventoryPage() {
                         ) : (
                           money(product.sellingPrice)
                         )}
+                      </td>
+                      <td className="py-2.5 pr-4 text-right text-sm text-foreground/60">
+                        {product.rateA != null && product.rateA > 0 ? money(product.rateA) : "—"}
+                      </td>
+                      <td className="py-2.5 pr-4 text-right text-sm text-foreground/60">
+                        {product.rateB != null && product.rateB > 0 ? money(product.rateB) : "—"}
+                      </td>
+                      <td className="py-2.5 pr-4 text-right text-sm text-foreground/60">
+                        {product.rateC != null && product.rateC > 0 ? money(product.rateC) : "—"}
+                      </td>
+                      {/* Pack info */}
+                      <td className="py-2.5 pr-4 text-right">
+                        {product.isBulk ? (
+                          <span className="text-[11px] text-foreground/50">
+                            {packings.filter((p) => p.bulkProductId === product.id).length} pack{packings.filter((p) => p.bulkProductId === product.id).length !== 1 ? "s" : ""}
+                          </span>
+                        ) : product.bulkProductId ? (
+                          <span className="text-[11px] text-brand">← Bulk product</span>
+                        ) : null}
                       </td>
                       <td className="py-2.5 pr-4 text-right">
                         <button

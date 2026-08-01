@@ -11,6 +11,7 @@ export interface ProductInput {
   hsn?: string;
   unit?: string;
   purchasePrice: number;
+  mrp: number;
   sellingPrice: number;
   taxRate: number;
   discountType?: "percent" | "amount" | null;
@@ -18,10 +19,17 @@ export interface ProductInput {
   stock: number;
 }
 
-export function useProducts(search = "") {
+export function useProducts(search = "", category = "") {
   return useQuery({
-    queryKey: ["products", search],
-    queryFn: () => api.get<Product[]>(`/products${search ? `?q=${encodeURIComponent(search)}` : ""}`),
+    queryKey: ["products", search, category],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (search) params.set("q", search);
+      if (category) params.set("category", category);
+      const qs = params.toString();
+      return api.get<Product[]>(`/products${qs ? `?${qs}` : ""}`);
+    },
+    staleTime: 10_000, // Don't refetch within 10 seconds
   });
 }
 
@@ -29,7 +37,6 @@ export function useLowStock() {
   return useQuery({
     queryKey: ["products", "low-stock"],
     queryFn: () => api.get<{ threshold: number; products: Product[] }>("/products/low-stock"),
-    refetchInterval: 30_000,
   });
 }
 

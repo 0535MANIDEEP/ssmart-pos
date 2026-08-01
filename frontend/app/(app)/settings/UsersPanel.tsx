@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/Button";
 import { useToast } from "@/components/Toast";
 import { useUsers, useCreateUser, useUpdateUser } from "@/hooks/useAuth";
 import { useMe } from "@/hooks/useAuth";
-import { ApiError } from "@/lib/api";
+import { api, ApiError, describeApiError } from "@/lib/api";
 
 const createSchema = z.object({
   name: z.string().trim().min(1, "Name is required"),
@@ -45,7 +45,7 @@ export function UsersPanel() {
       reset({ role: "cashier" });
       setShowForm(false);
     } catch (err) {
-      show(err instanceof ApiError ? err.message : "Could not create user", "error");
+      show(describeApiError(err, "Could not create user"), "error");
     }
   }
 
@@ -54,7 +54,7 @@ export function UsersPanel() {
       await updateUser.mutateAsync({ id, data: { active } });
       show(active ? "User enabled" : "User disabled", "success");
     } catch (err) {
-      show(err instanceof ApiError ? err.message : "Could not update user", "error");
+      show(describeApiError(err, "Could not update user"), "error");
     }
   }
 

@@ -13,6 +13,9 @@ const COLUMN_MAP = {
   'mrp': 'sellingPrice', 'm.r.p.': 'sellingPrice',
   'purchase rate': 'purchasePrice', 'purchase price': 'purchasePrice', 'cost': 'purchasePrice', 'cost price': 'purchasePrice',
   'sale rate': 'sellingPrice', 'selling price': 'sellingPrice', 'rate': 'sellingPrice',
+  'rate a': 'rateA', 'ratea': 'rateA', 'wholesale rate': 'rateA', 'wholesale': 'rateA',
+  'rate b': 'rateB', 'rateb': 'rateB', 'retail rate': 'rateB', 'retail': 'rateB',
+  'rate c': 'rateC', 'ratec': 'rateC', 'special rate': 'rateC', 'dealer rate': 'rateC', 'dealer': 'rateC',
   'gst': 'taxRate', 'gst%': 'taxRate', 'tax': 'taxRate', 'tax rate': 'taxRate', 'gst rate': 'taxRate',
   'hsn': 'hsn', 'hsn code': 'hsn',
   'qty': 'stock', 'quantity': 'stock', 'stock': 'stock', 'current stock': 'stock',
@@ -28,6 +31,7 @@ const COLUMN_MAP = {
   'account group': 'accountGroup', 'ledger group': 'accountGroup', 'group name': 'accountGroup',
   'email': 'email',
   'pincode': 'pincode', 'pin': 'pincode',
+  'rate tier': 'rateTier', 'rate': 'rateTier', 'customer type': 'rateTier',
 };
 
 function autoMapColumns(headers) {
@@ -139,6 +143,9 @@ router.post('/import', async (req, res) => {
               unit: mapped.unit ? String(mapped.unit).trim() : null,
               purchasePrice: Number(mapped.purchasePrice) || 0,
               sellingPrice: Number(mapped.sellingPrice) || Number(mapped.purchasePrice) || 0,
+              rateA: mapped.rateA ? Number(mapped.rateA) : null,
+              rateB: mapped.rateB ? Number(mapped.rateB) : null,
+              rateC: mapped.rateC ? Number(mapped.rateC) : null,
               taxRate: Number(mapped.taxRate) || 0,
               stock: Number(mapped.stock) || 0,
             },
@@ -148,6 +155,9 @@ router.post('/import', async (req, res) => {
               hsn: mapped.hsn ? String(mapped.hsn).trim() : undefined,
               purchasePrice: Number(mapped.purchasePrice) || undefined,
               sellingPrice: Number(mapped.sellingPrice) || undefined,
+              rateA: mapped.rateA ? Number(mapped.rateA) : undefined,
+              rateB: mapped.rateB ? Number(mapped.rateB) : undefined,
+              rateC: mapped.rateC ? Number(mapped.rateC) : undefined,
               taxRate: Number(mapped.taxRate) || undefined,
               stock: Number(mapped.stock) || undefined,
             },
@@ -177,10 +187,12 @@ router.post('/import', async (req, res) => {
               name: String(mapped.name).trim(),
               phone,
               email: mapped.email ? String(mapped.email).trim() : null,
+              rateTier: mapped.rateTier ? String(mapped.rateTier).trim().toUpperCase() : "B",
             },
             update: {
               name: String(mapped.name).trim(),
               email: mapped.email ? String(mapped.email).trim() : undefined,
+              rateTier: mapped.rateTier ? String(mapped.rateTier).trim().toUpperCase() : undefined,
             },
           });
           imported++;

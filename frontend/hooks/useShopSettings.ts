@@ -8,6 +8,7 @@ export function useShopSettings() {
   return useQuery({
     queryKey: ["shop-settings"],
     queryFn: () => api.get<ShopSettings>("/settings"),
+    staleTime: 60_000, // Settings rarely change, refetch at most once per minute
   });
 }
 

@@ -11,6 +11,7 @@ const customerSchema = z.object({
   name: z.string().trim().min(1).max(160),
   phone: z.string().trim().min(3).max(30),
   email: z.string().trim().max(200).optional().or(z.literal('')),
+  rateTier: z.enum(['A', 'B', 'C']).optional().default('B'),
 });
 
 // GET /api/customers?q=search
@@ -109,6 +110,22 @@ router.get('/:id/due-payments', async (req, res) => {
     orderBy: { createdAt: 'desc' },
   });
   res.json(payments);
+});
+
+router.delete('/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid customer id' });
+  try {
+    const existing = await prisma.customer.findUnique({ where: { id } });
+    if (!existing) return res.status(404).json({ error: 'Customer not found' });
+    if (existing.totalDue > 0) {
+      return res.status(400).json({ error: 'Cannot delete customer with outstanding due. Settle first.' });
+    }
+    await prisma.customer.delete({ where: { id } });
+    res.json({ ok: true });
+  } catch {
+    res.status(500).json({ error: 'Could not delete customer' });
+  }
 });
 
 router.put('/:id', async (req, res) => {

@@ -113,7 +113,7 @@ router.post('/', async (req, res) => {
             { status: 409 }
           );
         }
-        lines.push({ product, quantity: item.quantity });
+        lines.push({ product, quantity: item.quantity, rateTier: item.rateTier || null, discountType: item.discountType || null, discountValue: item.discountValue || 0 });
       }
 
       // Resolve customer (needed for loyalty). Match by phone; create if new
@@ -242,6 +242,7 @@ router.post('/', async (req, res) => {
           customerId: customer?.id ?? null,
           customerName: body.customerName || customer?.name || 'Walk-in Customer',
           customerPhone: body.customerPhone || null,
+          salesmanId: body.salesmanId || null,
           subtotal: computed.subtotal,
           discountType: computed.discountType,
           discountValue: computed.discountValue,
@@ -296,20 +297,25 @@ router.post('/', async (req, res) => {
       }
       for (const [productId, qty] of restock) {
         await tx.product.update({ where: { id: productId }, data: { stock: { increment: qty } } });
+        const product = productMap.get(productId);
+        if (product && product.bulkProductId && product.packSize && product.packSize > 0) {
+          const bulkReplenish = qty / product.packSize;
+          await tx.product.update({
+            where: { id: product.bulkProductId },
+            data: { stock: { increment: Math.ceil(bulkReplenish) } },
+          });
+        }
       }
 
       for (const item of body.items) {
-        // Check if this is a packed product linked to a bulk parent
-        const product = await tx.product.findUnique({ where: { id: item.productId } });
+        const product = productMap.get(item.productId);
         if (product && product.bulkProductId && product.packSize && product.packSize > 0) {
-          // Deduct from bulk product: quantity sold / packSize
           const bulkDeduction = item.quantity / product.packSize;
           await tx.product.update({
             where: { id: product.bulkProductId },
             data: { stock: { decrement: Math.ceil(bulkDeduction) } },
           });
         } else {
-          // Normal product — deduct directly
           await tx.product.update({
             where: { id: item.productId },
             data: { stock: { decrement: item.quantity } },
@@ -372,18 +378,25 @@ router.get('/summary', async (req, res) => {
   const start = new Date();
   start.setHours(0, 0, 0, 0);
 
-  const [todaysInvoices, todaysReturns, allInvoices, allReturns] = await Promise.all([
-    prisma.invoice.findMany({ where: { createdAt: { gte: start } } }),
-    prisma.return.findMany({ where: { createdAt: { gte: start } }, select: { totalRefund: true } }),
+  const [todaysAgg, todaysReturnAgg, allInvoices, allReturns] = await Promise.all([
+    prisma.invoice.aggregate({
+      where: { createdAt: { gte: start } },
+      _sum: { totalAmount: true },
+      _count: true,
+    }),
+    prisma.return.aggregate({
+      where: { createdAt: { gte: start } },
+      _sum: { totalRefund: true },
+    }),
     prisma.invoice.aggregate({ _sum: { totalAmount: true }, _count: true }),
     prisma.return.aggregate({ _sum: { totalRefund: true } }),
   ]);
 
-  const todaysInvoiceTotal = round2(todaysInvoices.reduce((s, i) => s + i.totalAmount, 0));
-  const todaysReturnTotal = round2(todaysReturns.reduce((s, r) => s + r.totalRefund, 0));
+  const todaysInvoiceTotal = round2(todaysAgg._sum.totalAmount || 0);
+  const todaysReturnTotal = round2(todaysReturnAgg._sum.totalRefund || 0);
 
   res.json({
-    todaysCount: todaysInvoices.length,
+    todaysCount: todaysAgg._count,
     todaysRevenue: round2(todaysInvoiceTotal - todaysReturnTotal),
     totalSales: allInvoices._count,
     totalRevenue: round2((allInvoices._sum.totalAmount || 0) - (allReturns._sum.totalRefund || 0)),
@@ -505,7 +518,7 @@ router.get('/export.csv', async (req, res) => {
     if (req.query.from) where.createdAt.gte = new Date(req.query.from);
     if (req.query.to) where.createdAt.lte = new Date(req.query.to);
   }
-  const invoices = await prisma.invoice.findMany({ where, orderBy: { createdAt: 'desc' } });
+  const invoices = await prisma.invoice.findMany({ where, orderBy: { createdAt: 'desc' }, take: 10000 });
 
   const header = [
     'Invoice Number',
@@ -548,6 +561,120 @@ router.get('/:id', async (req, res) => {
   const invoice = await prisma.invoice.findUnique({ where: { id }, include: { items: true, payments: true } });
   if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
   res.json(invoice);
+});
+
+// GET /api/invoices/reports/daily-sale?from=YYYY-MM-DD&to=YYYY-MM-DD
+// Daily sale summary: date, invoice count, gross, returns, net revenue, tax
+router.get('/reports/daily-sale', async (req, res) => {
+  const from = req.query.from ? new Date(req.query.from) : new Date(new Date().setDate(new Date().getDate() - 30));
+  const to = req.query.to ? new Date(req.query.to) : new Date();
+  to.setHours(23, 59, 59, 999);
+
+  const invoices = await prisma.invoice.findMany({
+    where: { createdAt: { gte: from, lte: to } },
+    select: { createdAt: true, totalAmount: true, taxAmount: true, discountAmount: true, paymentMethod: true },
+  });
+  const returns = await prisma.return.findMany({
+    where: { createdAt: { gte: from, lte: to } },
+    select: { totalRefund: true, createdAt: true },
+  });
+
+  // Group by date
+  const byDate = {};
+  for (const inv of invoices) {
+    const d = inv.createdAt.toISOString().slice(0, 10);
+    if (!byDate[d]) byDate[d] = { date: d, count: 0, gross: 0, tax: 0, discount: 0 };
+    byDate[d].count++;
+    byDate[d].gross += inv.totalAmount;
+    byDate[d].tax += inv.taxAmount;
+    byDate[d].discount += inv.discountAmount;
+  }
+  for (const ret of returns) {
+    const d = ret.createdAt.toISOString().slice(0, 10);
+    if (!byDate[d]) byDate[d] = { date: d, count: 0, gross: 0, tax: 0, discount: 0 };
+    byDate[d].gross -= ret.totalRefund;
+  }
+
+  res.json(Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date)));
+});
+
+// GET /api/invoices/reports/item-wise?from=YYYY-MM-DD&to=YYYY-MM-DD
+router.get('/reports/item-wise', async (req, res) => {
+  const from = req.query.from ? new Date(req.query.from) : new Date(new Date().setDate(new Date().getDate() - 30));
+  const to = req.query.to ? new Date(req.query.to) : new Date();
+  to.setHours(23, 59, 59, 999);
+
+  const items = await prisma.invoiceItem.findMany({
+    where: { invoice: { createdAt: { gte: from, lte: to } } },
+    select: { productId: true, name: true, quantity: true, price: true, taxAmount: true, total: true, discountType: true, discountValue: true },
+  });
+
+  // Group by product
+  const byProduct = {};
+  for (const item of items) {
+    const key = item.productId;
+    if (!byProduct[key]) byProduct[key] = { productId: item.productId, name: item.name, totalQty: 0, totalRevenue: 0, totalTax: 0 };
+    byProduct[key].totalQty += item.quantity;
+    byProduct[key].totalRevenue += item.total;
+    byProduct[key].totalTax += item.taxAmount;
+  }
+
+  res.json(Object.values(byProduct).sort((a, b) => b.totalQty - a.totalQty));
+});
+
+// GET /api/invoices/reports/stock-valuation
+router.get('/reports/stock-valuation', async (req, res) => {
+  const products = await prisma.product.findMany({
+    select: { id: true, name: true, barcode: true, category: true, unit: true, stock: true, purchasePrice: true, sellingPrice: true, taxRate: true, minStock: true, expiryDate: true },
+    orderBy: { name: 'asc' },
+  });
+
+  const result = products.map(p => ({
+    ...p,
+    stockValue: Math.round(p.stock * p.purchasePrice * 100) / 100,
+    retailValue: Math.round(p.stock * p.sellingPrice * 100) / 100,
+    lowStock: p.minStock > 0 ? p.stock <= p.minStock : p.stock <= 5,
+    expired: p.expiryDate ? new Date(p.expiryDate) < new Date() : false,
+  }));
+
+  const totals = result.reduce((acc, p) => ({
+    totalItems: acc.totalItems + p.stock,
+    totalCostValue: acc.totalCostValue + p.stockValue,
+    totalRetailValue: acc.totalRetailValue + p.retailValue,
+    lowStockCount: acc.lowStockCount + (p.lowStock ? 1 : 0),
+    expiredCount: acc.expiredCount + (p.expired ? 1 : 0),
+  }), { totalItems: 0, totalCostValue: 0, totalRetailValue: 0, lowStockCount: 0, expiredCount: 0 });
+
+  res.json({ products: result, totals });
+});
+
+// GET /api/invoices/reports/gst?from=YYYY-MM-DD&to=YYYY-MM-DD — GSTR-1 summary
+router.get('/reports/gst', async (req, res) => {
+  const from = req.query.from ? new Date(req.query.from) : new Date(new Date().setMonth(new Date().getMonth() - 1));
+  const to = req.query.to ? new Date(req.query.to) : new Date();
+  to.setHours(23, 59, 59, 999);
+
+  const items = await prisma.invoiceItem.findMany({
+    where: { invoice: { createdAt: { gte: from, lte: to } } },
+    select: { taxRate: true, total: true, taxAmount: true, quantity: true },
+  });
+
+  // Group by GST rate
+  const byRate = {};
+  for (const item of items) {
+    const rate = item.taxRate || 0;
+    const key = String(rate);
+    if (!byRate[key]) byRate[key] = { rate, taxableAmount: 0, taxAmount: 0, itemCount: 0, totalQty: 0 };
+    byRate[key].taxableAmount += item.total - item.taxAmount;
+    byRate[key].taxAmount += item.taxAmount;
+    byRate[key].itemCount++;
+    byRate[key].totalQty += item.quantity;
+  }
+
+  const totalTaxable = Object.values(byRate).reduce((s, r) => s + r.taxableAmount, 0);
+  const totalTax = Object.values(byRate).reduce((s, r) => s + r.taxAmount, 0);
+
+  res.json({ period: { from: from.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10) }, rates: Object.values(byRate).sort((a, b) => a.rate - b.rate), totalTaxable, totalTax });
 });
 
 module.exports = router;

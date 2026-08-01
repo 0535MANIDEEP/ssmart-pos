@@ -28,7 +28,6 @@ export function useSalesSummary() {
   return useQuery({
     queryKey: ["invoices", "summary"],
     queryFn: () => api.get<SalesSummary>("/invoices/summary"),
-    refetchInterval: 30_000,
   });
 }
 
@@ -44,6 +43,5 @@ export function useSalesAnalytics() {
   return useQuery({
     queryKey: ["invoices", "analytics"],
     queryFn: () => api.get<SalesAnalytics>("/invoices/analytics"),
-    refetchInterval: 60_000,
   });
 }

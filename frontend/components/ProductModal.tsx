@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { Barcode as BarcodeIcon, X } from "lucide-react";
+import { Barcode as BarcodeIcon, X, Info } from "lucide-react";
 import { Field } from "@/components/ui/Field";
 import { Select } from "@/components/ui/Select";
 import { Button } from "@/components/ui/Button";
@@ -25,11 +25,18 @@ const productSchema = z.object({
   hsn: z.string().trim().optional(),
   unit: z.string().trim().optional(),
   purchasePrice: z.number().min(0, "Must be 0 or more"),
-  sellingPrice: z.number().min(0, "Must be 0 or more"),
+  mrp: z.number().min(0.01, "MRP must be greater than 0"),
+  sellingPrice: z.number().min(0.01, "Selling price must be greater than 0"),
+  rateA: z.number().min(0).nullable(),
+  rateB: z.number().min(0).nullable(),
+  rateC: z.number().min(0).nullable(),
   taxRate: z.number().min(0).max(100),
   discountType: z.enum(["percent", "amount"]).nullable(),
   discountValue: z.number().min(0, "Must be 0 or more"),
   stock: z.number().int().min(0, "Must be 0 or more"),
+  minStock: z.number().int().min(0, "Must be 0 or more"),
+  expiryDate: z.string().optional(),
+  batchNumber: z.string().trim().optional(),
 });
 type ProductForm = z.infer<typeof productSchema>;
 
@@ -73,11 +80,18 @@ export function ProductModal({ mode, product, initialBarcode, onClose }: Product
       hsn: product?.hsn ?? "",
       unit: product?.unit ?? "",
       purchasePrice: product?.purchasePrice ?? 0,
+      mrp: product?.mrp ?? 0,
       sellingPrice: product?.sellingPrice ?? 0,
+      rateA: product?.rateA ?? null,
+      rateB: product?.rateB ?? null,
+      rateC: product?.rateC ?? null,
       taxRate: product?.taxRate ?? shop?.defaultTaxRate ?? 0,
       discountType: product?.discountType ?? null,
       discountValue: product?.discountValue ?? 0,
       stock: product?.stock ?? 0,
+      minStock: product?.minStock ?? 0,
+      expiryDate: product?.expiryDate ? product.expiryDate.split("T")[0] : "",
+      batchNumber: product?.batchNumber ?? "",
     },
   });
 
@@ -93,6 +107,9 @@ export function ProductModal({ mode, product, initialBarcode, onClose }: Product
     try {
       const payload = {
         ...values,
+        rateA: values.rateA || null,
+        rateB: values.rateB || null,
+        rateC: values.rateC || null,
         isBulk,
         packSize: packSize ? Number(packSize) : null,
         bulkProductId: bulkProductId ? Number(bulkProductId) : null,
@@ -114,10 +131,16 @@ export function ProductModal({ mode, product, initialBarcode, onClose }: Product
   const taxRate = useWatch({ control, name: "taxRate" });
   const hsnValue = useWatch({ control, name: "hsn" });
   const barcodeValue = useWatch({ control, name: "barcode" });
+  const mrp = useWatch({ control, name: "mrp" });
   const sellingPrice = useWatch({ control, name: "sellingPrice" });
+  const purchasePrice = useWatch({ control, name: "purchasePrice" });
   const discountType = useWatch({ control, name: "discountType" });
   const discountValue = useWatch({ control, name: "discountValue" });
   const sym = shop?.currencySymbol ?? "\u20B9";
+
+  const margin = mrp > 0 && purchasePrice > 0 ? ((mrp - purchasePrice) / mrp * 100).toFixed(1) : "—";
+  const actualMargin = sellingPrice > 0 && purchasePrice > 0 ? ((sellingPrice - purchasePrice) / sellingPrice * 100).toFixed(1) : "—";
+
   const discountedPrice = (() => {
     if (!discountType || !discountValue) return sellingPrice;
     if (discountType === "percent") {
@@ -217,24 +240,109 @@ export function ProductModal({ mode, product, initialBarcode, onClose }: Product
               </option>
             ))}
           </datalist>
-          <div className="grid grid-cols-2 gap-4">
-            <Field
-              label="Purchase price"
-              type="number"
-              step="0.01"
-              min={0}
-              error={errors.purchasePrice?.message}
-              {...register("purchasePrice", { valueAsNumber: true })}
-            />
-            <Field
-              label="Selling price"
-              type="number"
-              step="0.01"
-              min={0}
-              error={errors.sellingPrice?.message}
-              {...register("sellingPrice", { valueAsNumber: true })}
-            />
+
+          {/* ═══ Price Section ═══ */}
+          <div className="rounded-lg border border-border bg-surface-muted/30 p-3">
+            <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-foreground/50">Pricing</p>
+
+            {/* Row 1: Purchase Price */}
+            <div className="mb-3">
+              <Field
+                label="Purchase Price (cost from supplier)"
+                type="number"
+                step="0.01"
+                min={0}
+                error={errors.purchasePrice?.message}
+                {...register("purchasePrice", { valueAsNumber: true })}
+              />
+              <p className="mt-0.5 text-[11px] text-foreground/40">Auto-updated when you record a purchase invoice</p>
+            </div>
+
+            {/* Row 2: MRP and Our Selling Price */}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Field
+                  label="MRP (Maximum Retail Price)"
+                  type="number"
+                  step="0.01"
+                  min={0}
+                  error={errors.mrp?.message}
+                  {...register("mrp", { valueAsNumber: true })}
+                />
+                <p className="mt-0.5 text-[11px] text-foreground/40">Printed on label, legal ceiling</p>
+              </div>
+              <div>
+                <Field
+                  label="Our Selling Price"
+                  type="number"
+                  step="0.01"
+                  min={0}
+                  error={errors.sellingPrice?.message}
+                  {...register("sellingPrice", { valueAsNumber: true })}
+                />
+                <p className="mt-0.5 text-[11px] text-foreground/40">Actual price we charge ({"<="} MRP)</p>
+              </div>
+            </div>
+
+            {/* Margin display */}
+            {purchasePrice > 0 && mrp > 0 && (
+              <div className="mt-2 flex items-center gap-3 text-xs">
+                <span className="text-foreground/50">
+                  MRP Margin: <span className={Number(margin) > 0 ? "font-semibold text-success" : "font-semibold text-danger"}>{margin}%</span>
+                </span>
+                {sellingPrice > 0 && sellingPrice !== mrp && (
+                  <span className="text-foreground/50">
+                    Our Margin: <span className={Number(actualMargin) > 0 ? "font-semibold text-success" : "font-semibold text-danger"}>{actualMargin}%</span>
+                  </span>
+                )}
+              </div>
+            )}
+
+            {/* Price validation warning */}
+            {sellingPrice > 0 && mrp > 0 && sellingPrice > mrp && (
+              <p className="mt-1 text-xs text-danger flex items-center gap-1">
+                <Info className="h-3 w-3" /> Selling price cannot be higher than MRP
+              </p>
+            )}
           </div>
+
+          {/* ═══ Rate Tiers ═══ */}
+          <div className="rounded-lg border border-border p-3">
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-foreground/50">
+              Rate Tiers
+            </p>
+            <div className="grid grid-cols-3 gap-3">
+              <Field
+                label="Wholesale (A)"
+                type="number"
+                step="0.01"
+                min={0}
+                placeholder={`Default: ${formatMoney(sellingPrice || 0, sym)}`}
+                {...register("rateA", { valueAsNumber: true })}
+              />
+              <Field
+                label="Retail (B)"
+                type="number"
+                step="0.01"
+                min={0}
+                placeholder={`Default: ${formatMoney(sellingPrice || 0, sym)}`}
+                {...register("rateB", { valueAsNumber: true })}
+              />
+              <Field
+                label="Special (C)"
+                type="number"
+                step="0.01"
+                min={0}
+                placeholder={`Default: ${formatMoney(sellingPrice || 0, sym)}`}
+                {...register("rateC", { valueAsNumber: true })}
+              />
+            </div>
+            <p className="mt-1.5 text-[11px] text-foreground/40">
+              Leave blank to use &quot;Our Selling Price&quot;. Cashier selects which tier during billing.
+            </p>
+          </div>
+
+          {/* ═══ Standing Discount ═══ */}
           <div>
             <label className="mb-1.5 block text-sm font-medium text-foreground">
               Standing discount (applied automatically at checkout)
@@ -262,9 +370,11 @@ export function ProductModal({ mode, product, initialBarcode, onClose }: Product
             </div>
             {errors.discountValue?.message && <p className="mt-1 text-sm text-danger">{errors.discountValue.message}</p>}
             {discountType && discountValue > 0 && (
-              <p className="mt-1 text-xs text-success">Sells at {formatMoney(discountedPrice, sym)}</p>
+              <p className="mt-1 text-xs text-success">Final price: {formatMoney(discountedPrice, sym)}</p>
             )}
           </div>
+
+          {/* ═══ Stock & Inventory ═══ */}
           <div className="grid grid-cols-2 gap-4">
             <Field
               label="Stock quantity"
@@ -273,6 +383,27 @@ export function ProductModal({ mode, product, initialBarcode, onClose }: Product
               autoFocus={mode === "edit"}
               error={errors.stock?.message}
               {...register("stock", { valueAsNumber: true })}
+            />
+            <Field
+              label="Reorder level (min stock)"
+              type="number"
+              min={0}
+              placeholder="0 = no alert"
+              error={errors.minStock?.message}
+              {...register("minStock", { valueAsNumber: true })}
+            />
+            <Field
+              label="Expiry date (optional)"
+              type="date"
+              error={errors.expiryDate?.message}
+              {...register("expiryDate")}
+            />
+            <Field
+              label="Batch / Lot number (optional)"
+              type="text"
+              placeholder="e.g. BATCH001"
+              error={errors.batchNumber?.message}
+              {...register("batchNumber")}
             />
             {gst && (
               <Field

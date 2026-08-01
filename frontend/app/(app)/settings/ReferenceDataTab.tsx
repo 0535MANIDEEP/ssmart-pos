@@ -6,7 +6,7 @@ import { Card } from "@/components/ui/Card";
 import { Field } from "@/components/ui/Field";
 import { Button } from "@/components/ui/Button";
 import { useToast } from "@/components/Toast";
-import { ApiError, api } from "@/lib/api";
+import { api, ApiError, describeApiError } from "@/lib/api";
 import {
   useImportIfsc,
   useImportPincodes,
@@ -79,7 +79,7 @@ function TaxCodeImportCard({ count }: { count?: { hsn: number; sac: number } }) 
       const res = await importTaxCodes.mutateAsync({ type, file });
       show(`Imported ${res.imported} ${type} codes`, "success");
     } catch (err) {
-      show(err instanceof ApiError ? err.message : `Could not import ${type} codes`, "error");
+      show(describeApiError(err, `Could not import ${type} codes`), "error");
     }
   }
 
@@ -117,7 +117,7 @@ function PinCodeImportCard({ count }: { count?: number }) {
       const res = await importPincodes.mutateAsync(file);
       show(`Imported ${res.imported} PIN codes`, "success");
     } catch (err) {
-      show(err instanceof ApiError ? err.message : "Could not import PIN codes", "error");
+      show(describeApiError(err, "Could not import PIN codes"), "error");
     }
   }
 
@@ -150,7 +150,7 @@ function IfscCard({ count }: { count?: number }) {
       const res = await importIfsc.mutateAsync(file);
       show(`Imported ${res.imported} IFSC codes`, "success");
     } catch (err) {
-      show(err instanceof ApiError ? err.message : "Could not import IFSC codes", "error");
+      show(describeApiError(err, "Could not import IFSC codes"), "error");
     }
   }
 
