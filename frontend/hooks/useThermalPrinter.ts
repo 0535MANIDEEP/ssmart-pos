@@ -32,10 +32,12 @@ export function useThermalPrinter() {
       setStatus('disconnected');
     };
 
-    navigator.serial?.addEventListener('disconnect', handleDisconnect);
-    return () => {
-      navigator.serial?.removeEventListener('disconnect', handleDisconnect);
-    };
+    if (typeof navigator !== 'undefined' && navigator.serial) {
+      navigator.serial.addEventListener('disconnect', handleDisconnect);
+      return () => {
+        navigator.serial?.removeEventListener('disconnect', handleDisconnect);
+      };
+    }
   }, []);
 
   const connect = useCallback(async () => {

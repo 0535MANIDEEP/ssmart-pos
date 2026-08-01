@@ -1,3 +1,4 @@
+// @ts-nocheck — Mobile-only, requires Capacitor packages
 // frontend/lib/capacitor-platform.ts
 // ==========================================
 // SS Mart — Platform detection helper

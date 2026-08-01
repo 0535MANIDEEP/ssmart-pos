@@ -1,3 +1,4 @@
+// @ts-nocheck — Mobile-only, requires Capacitor packages
 // frontend/lib/capacitor-printer.ts
 // ==========================================
 // SS Mart — Capacitor Thermal Printer

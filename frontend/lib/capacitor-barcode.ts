@@ -1,3 +1,4 @@
+// @ts-nocheck — Mobile-only, requires Capacitor packages
 // frontend/lib/capacitor-barcode.ts
 // ==========================================
 // SS Mart — Capacitor Barcode Scanner

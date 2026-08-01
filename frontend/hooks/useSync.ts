@@ -7,6 +7,8 @@
 import { useEffect, useState, useCallback } from 'react';
 import { getSyncEngine, type SyncStatus, type SyncResult } from '@/lib/sync-engine';
 
+type SyncTable = 'products' | 'customers' | 'invoices' | 'invoice_items' | 'categories' | 'suppliers' | 'purchases' | 'purchase_items' | 'users' | 'salesmen' | 'settings';
+
 export function useSync() {
   const [status, setStatus] = useState<SyncStatus>({
     state: 'idle',
@@ -33,8 +35,8 @@ export function useSync() {
 
   const queueMutation = useCallback(
     async (
-      table: Parameters<SyncEngine['queueMutation']>[0],
-      operation: Parameters<SyncEngine['queueMutation']>[1],
+      table: SyncTable,
+      operation: 'INSERT' | 'UPDATE' | 'DELETE',
       recordId: string,
       data: Record<string, unknown>
     ) => {
@@ -51,6 +53,3 @@ export function useSync() {
     isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true,
   };
 }
-
-// Re-export SyncEngine type for queueMutation parameter typing
-import type { SyncEngine } from '@/lib/sync-engine';

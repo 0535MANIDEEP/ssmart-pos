@@ -4,6 +4,27 @@
 // Works on Chrome/Edge desktop with USB thermal printers
 // ==========================================
 
+// Web Serial API type declarations
+declare global {
+  interface SerialPort {
+    open(options: { baudRate: number }): Promise<void>;
+    close(): Promise<void>;
+    readable: ReadableStream<Uint8Array> | null;
+    writable: WritableStream<Uint8Array> | null;
+  }
+
+  interface Serial {
+    getPorts(): Promise<SerialPort[]>;
+    requestPort(options?: { filters?: Array<{ vendorId?: string; productId?: string }> }): Promise<SerialPort>;
+    addEventListener(type: string, listener: EventListener): void;
+    removeEventListener(type: string, listener: EventListener): void;
+  }
+
+  interface Navigator {
+    serial?: Serial;
+  }
+}
+
 export interface ThermalPrinterDevice {
   port: SerialPort;
   writer: WritableStreamDefaultWriter<Uint8Array>;
@@ -25,7 +46,7 @@ export async function listSerialPorts(): Promise<SerialPort[]> {
   if (!isWebSerialSupported()) return [];
 
   try {
-    const ports = await navigator.serial.getPorts();
+    const ports = await navigator.serial!.getPorts();
     return ports;
   } catch {
     return [];
@@ -40,7 +61,7 @@ export async function connectPrinter(): Promise<ThermalPrinterDevice | null> {
 
   try {
     // Prompt user to select a serial port
-    const port = await navigator.serial.requestPort({
+    const port = await navigator.serial!.requestPort({
       filters: [
         // Common thermal printer vendor/product IDs
         { vendorId: '0x0416', productId: '0x5011' }, // Winbond

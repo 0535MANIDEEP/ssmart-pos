@@ -7,6 +7,7 @@
 
 import { useState } from 'react';
 import { useThermalPrinter } from '@/hooks/useThermalPrinter';
+import { getCurrentDevice } from '@/lib/thermal-printer';
 import {
   Printer,
   PrinterCheck,

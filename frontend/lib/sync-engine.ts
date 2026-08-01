@@ -199,7 +199,7 @@ class SyncEngine {
 
   // Sync pending mutations to server
   async syncToServer(): Promise<SyncResult> {
-    if (this.syncInProgress) return { success: false, reason: 'already_syncing' };
+    if (this.syncInProgress) return { success: false, synced: 0, failed: 0, errors: [], reason: 'already_syncing' };
     this.syncInProgress = true;
     this.setStatus({ state: 'syncing' });
 

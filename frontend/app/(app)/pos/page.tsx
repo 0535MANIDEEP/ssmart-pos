@@ -14,6 +14,10 @@ import { ReceiptActions } from "@/components/ReceiptActions";
 import { BillConfirmDialog } from "@/components/BillConfirmDialog";
 import { ReturnPanel, type ReturnDraftLine } from "@/components/ReturnPanel";
 import { QuantityPopover } from "@/components/QuantityPopover";
+import PrinterStatus from "@/components/PrinterStatus";
+import CashDrawerDialog from "@/components/CashDrawerDialog";
+import SalesmanLock from "@/components/SalesmanLock";
+import KeyboardShortcutsHelp from "@/components/KeyboardShortcutsHelp";
 import { useBarcodeScanner } from "@/hooks/useBarcodeScanner";
 import { ProductSearch } from "@/components/ProductSearch";
 import { useShopSettings } from "@/hooks/useShopSettings";
@@ -66,6 +70,8 @@ export default function PosPage() {
   const [showShutdownDialog, setShowShutdownDialog] = useState(false);
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
   const [showHelpDialog, setShowHelpDialog] = useState(false);
+  const [showCashDrawer, setShowCashDrawer] = useState(false);
+  const [showSalesmanLock, setShowSalesmanLock] = useState(false);
   const [focusedCartIndex, setFocusedCartIndex] = useState<number | null>(null);
   const [recoveryDraft, setRecoveryDraft] = useState<{ id: number; state: Record<string, unknown>; updatedAt: string } | null>(null);
   const [showRecoveryDialog, setShowRecoveryDialog] = useState(false);
@@ -540,6 +546,7 @@ export default function PosPage() {
       if (isInputFocused()) return;
       if (e.key === "F5") { e.preventDefault(); resetSale(); show("Cart cleared", "info"); }
       if (e.key === "F1") { e.preventDefault(); setShowHelpDialog(true); }
+      if (e.key === "F8") { e.preventDefault(); setShowCashDrawer(true); }
       if (e.key === "F6") { e.preventDefault(); const phone = posRef.current?.querySelector('input[placeholder*="Phone"]') as HTMLElement | null; if (phone) phone.focus(); }
       if (e.key === "F7") { e.preventDefault(); const disc = posRef.current?.querySelector('select[aria-label="Discount type"]') as HTMLElement | null; if (disc) disc.focus(); }
       if (e.key === "F12" || e.key === "End") { e.preventDefault(); if (canFinalize) setShowConfirmDialog(true); }
@@ -572,6 +579,7 @@ export default function PosPage() {
           </div>
         </div>
         <div className="flex items-center gap-3">
+          <PrinterStatus />
           {autoSaveStatus === "saving" && (
             <span className="flex items-center gap-1.5 rounded-full border border-warning/30 bg-warning-light px-3 py-1 text-xs font-medium text-warning">
               <span className="h-1.5 w-1.5 rounded-full bg-warning animate-pulse" />
@@ -584,6 +592,15 @@ export default function PosPage() {
               Saved
             </span>
           )}
+          <button
+            type="button"
+            onClick={() => setShowCashDrawer(true)}
+            className="btn-touch flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-foreground hover:bg-surface-muted"
+            title="Open cash drawer (F8)"
+          >
+            <Banknote className="h-3.5 w-3.5" />
+            Cash Drawer
+          </button>
           <button
             type="button"
             onClick={holdBill}
@@ -775,57 +792,21 @@ export default function PosPage() {
       )}
 
       {showHelpDialog && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setShowHelpDialog(false)}>
-          <div className="w-full max-w-lg rounded-xl border border-border bg-surface p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center gap-3 mb-4">
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-brand-light">
-                <HelpCircle className="h-5 w-5 text-brand" />
-              </div>
-              <h2 className="text-lg font-bold text-foreground">How to use POS</h2>
-            </div>
-            <div className="flex flex-col gap-3 text-sm text-foreground/80 max-h-[60vh] overflow-y-auto">
-              <Section title="Quick Sale">
-                <li>Scan a barcode or type a product name in the search box</li>
-                <li>Product is added to cart with quantity 1 — click qty to change</li>
-                <li>Press <Key>F12</Key> or <Key>End</Key> to open the checkout popup</li>
-                <li>Select payment method (Cash / UPI / Card), enter amount, confirm</li>
-              </Section>
-              <Section title="Customer & Loyalty">
-                <li>Press <Key>F6</Key> to jump to the customer phone field</li>
-                <li>Type a phone number and press the search icon to look up the customer</li>
-                <li>Loyalty points are earned automatically (10 points per ₹100)</li>
-                <li>Redeem points by entering a value — 1 point = ₹0.10 off</li>
-              </Section>
-              <Section title="Discount">
-                <li>Press <Key>F7</Key> to jump to the discount dropdown</li>
-                <li>Select <strong>%</strong> for percentage discount or <strong>₹</strong> for flat amount</li>
-                <li>Enter the discount value — it applies to the whole bill</li>
-              </Section>
-              <Section title="Split Payment">
-                <li>Click <strong>+ Split payment</strong> to add multiple payment methods</li>
-                <li>Example: ₹500 Cash + ₹200 UPI for a ₹700 bill</li>
-                <li>The system shows remaining amount and change due in real time</li>
-              </Section>
-              <Section title="Return / Exchange">
-                <li>In the Return section, type an invoice number and press search</li>
-                <li>Select items to return and enter quantities</li>
-                <li>Choose refund method: Cash, UPI, or store credit</li>
-                <li>Returns can be combined with a new sale in the same transaction</li>
-              </Section>
-              <Section title="Keyboard Shortcuts">
-                <li><Key>F1</Key> Show this help</li>
-                <li><Key>F5</Key> Clear cart / start new sale</li>
-                <li><Key>F6</Key> Focus customer phone field</li>
-                <li><Key>F7</Key> Focus discount field</li>
-                <li><Key>F12</Key> / <Key>End</Key> Open checkout</li>
-                <li><Key>Ctrl+Space</Key> Focus search bar</li>
-                <li><Key>Esc</Key> Close popups</li>
-              </Section>
-            </div>
-            <Button type="button" variant="secondary" className="mt-4 w-full" onClick={() => setShowHelpDialog(false)}>Got it</Button>
-          </div>
-        </div>
+        <KeyboardShortcutsHelp isOpen={showHelpDialog} onClose={() => setShowHelpDialog(false)} />
       )}
+
+      <CashDrawerDialog
+        isOpen={showCashDrawer}
+        onClose={() => setShowCashDrawer(false)}
+        onUpdate={() => {}}
+      />
+
+      <SalesmanLock
+        isOpen={showSalesmanLock}
+        salesmen={salesmen.filter(s => s.active).map(s => ({ id: String(s.id), name: s.name }))}
+        onUnlock={(s) => { setSalesmanId(Number(s.id)); setShowSalesmanLock(false); show(`Salesman: ${s.name}`, 'success'); }}
+        onClose={() => setShowSalesmanLock(false)}
+      />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_340px] flex-1 overflow-hidden">
         {/* Cart */}
@@ -1144,7 +1125,16 @@ export default function PosPage() {
 
           {/* Salesman */}
           <Card className="flex flex-col gap-3 p-4">
-            <h2 className="text-base font-semibold text-foreground">Salesman</h2>
+            <div className="flex items-center justify-between">
+              <h2 className="text-base font-semibold text-foreground">Salesman</h2>
+              <button
+                type="button"
+                onClick={() => setShowSalesmanLock(true)}
+                className="text-xs font-medium text-brand hover:underline"
+              >
+                Change
+              </button>
+            </div>
             <select
               className="rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground"
               value={salesmanId ?? ""}
