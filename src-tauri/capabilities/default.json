@@ -1,0 +1,17 @@
+{
+  "identifier": "default",
+  "description": "Default permissions for SS Mart",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "shell:allow-open",
+    "shell:allow-execute",
+    {
+      "identifier": "shell:allow-spawn",
+      "allow": [
+        { "name": "node", "sidecar": false, "args": true },
+        { "name": "npm", "sidecar": false, "args": true }
+      ]
+    }
+  ]
+}

@@ -22,6 +22,7 @@ const migrateRoutes = require('./routes/migrate');
 const supplierRoutes = require('./routes/suppliers');
 const salesmanRoutes = require('./routes/salesmen');
 const packingRoutes = require('./routes/packing');
+const syncRoutes = require('./routes/sync');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -63,6 +64,7 @@ app.use('/api/migrate', migrateRoutes);
 app.use('/api/suppliers', supplierRoutes);
 app.use('/api/salesmen', salesmanRoutes);
 app.use('/api/packing', packingRoutes);
+app.use('/api/sync', syncRoutes);
 
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 
