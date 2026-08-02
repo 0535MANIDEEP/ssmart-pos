@@ -20,5 +20,8 @@
   },
   "dependencies": {
     "concurrently": "^9.0.0"
+  },
+  "devDependencies": {
+    "png-to-ico": "^3.0.2"
   }
 }

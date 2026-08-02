@@ -13,7 +13,7 @@ pub fn run() {
             window.set_focus().unwrap();
 
             // Setup system tray
-            tray::setup_tray(app)?;
+            tray::setup_tray(app.handle())?;
 
             Ok(())
         })
