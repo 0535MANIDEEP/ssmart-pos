@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "identifier": "com.ssmart.pos",
   "build": {
-    "frontendDist": "../frontend/.next",
+    "frontendDist": "../frontend/out",
     "devUrl": "http://localhost:1994",
     "beforeDevCommand": "",
     "beforeBuildCommand": ""
@@ -22,7 +22,8 @@
         "resizable": true,
         "decorations": true,
         "transparent": false,
-        "visible": false
+        "visible": true,
+        "url": "loading.html"
       }
     ],
     "security": {

@@ -6,11 +6,10 @@
 // ==========================================
 
 const express = require('express');
-const { PrismaClient } = require('@prisma/client');
+const prisma = require('../lib/prisma');
 const crypto = require('crypto');
 
 const router = express.Router();
-const prisma = new PrismaClient();
 
 // POST /api/sync/batch — Receive mutations from client
 router.post('/batch', async (req, res) => {
