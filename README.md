@@ -151,7 +151,7 @@ tablet/phone on the same network.
 └──────────────────────┘   (internal Docker network)      └──────────┬───────────┘
                                                                       │
                                                                       ▼
-                                                        SQLite (nodedr-pos_data)
+                                                        SQLite (ssmart-pos_data)
                                                         (named Docker volume)
 ```
 
@@ -199,7 +199,7 @@ Requires [Docker](https://docs.docker.com/get-docker/) and Docker Compose
 ### One-click install
 
 ```bash
-git clone https://github.com/Raktim94/nodedr-pos.git && cd nodedr-pos && ./install.sh
+git clone https://github.com/0535MANIDEEP/ssmart-pos.git && cd ssmart-pos && ./install.sh
 ```
 
 [`install.sh`](install.sh) checks that Docker is installed, builds both
@@ -213,8 +213,8 @@ setup), here's exactly what it does, one command at a time:
 
 ```bash
 # 1. Get the code
-git clone https://github.com/Raktim94/nodedr-pos.git
-cd nodedr-pos
+git clone https://github.com/0535MANIDEEP/ssmart-pos.git
+cd ssmart-pos
 
 # 2. Build the backend and frontend images (multi-stage, node:24-alpine).
 #    First run takes a few minutes; later runs are cached and fast.
@@ -222,7 +222,7 @@ docker compose build
 
 # 3. Start both containers in the background. Compose automatically
 #    creates the named volume declared in docker-compose.yml
-#    (nodedr-pos_data) the first time this runs.
+#    (ssmart-pos_data) the first time this runs.
 docker compose up -d
 
 # 4. (optional) Watch the logs until you see "listening on port 4000"
@@ -240,7 +240,7 @@ Then open **http://localhost:1994**. The first launch walks you through:
 3. You're dropped onto the dashboard, ready to add products and sell.
 
 All data (the SQLite database and the auto-generated session secret) lives
-in the **`nodedr-pos_data` Docker volume**, not inside the containers, so it
+in the **`ssmart-pos_data` Docker volume**, not inside the containers, so it
 survives `docker compose down`, container recreation, and image rebuilds.
 It's only removed if you explicitly delete it (see
 [Resetting](#resetting--clearing-data) below).
@@ -634,9 +634,9 @@ way.
 To pull the latest code and redeploy:
 
 ```bash
-# 1. Get the latest commits. Run this from inside your nodedr-pos
+# 1. Get the latest commits. Run this from inside your ssmart-pos
 #    directory — if you're not already there, cd into it first:
-#    cd nodedr-pos
+#    cd ssmart-pos
 git pull
 
 # 2. Rebuild the images and recreate the containers with the new code.
@@ -645,7 +645,7 @@ docker compose up -d --build
 ```
 
 Your data is safe across updates — the SQLite database and session secret
-live in the `nodedr-pos_data` Docker volume, entirely separate from the
+live in the `ssmart-pos_data` Docker volume, entirely separate from the
 container filesystem, so rebuilding or recreating containers never touches
 them. Run `docker volume ls` to see it.
 
@@ -656,7 +656,7 @@ folder, so back it up via a throwaway container that mounts the volume
 read-only and copies the file out:
 
 ```bash
-docker run --rm -v nodedr-pos_data:/data:ro -v "$PWD":/backup alpine \
+docker run --rm -v ssmart-pos_data:/data:ro -v "$PWD":/backup alpine \
   cp /data/pos.db /backup/pos-backup-$(date +%Y%m%d).db
 ```
 
@@ -681,7 +681,7 @@ docker compose up -d
 ```
 
 To remove the volume without also touching the containers:
-`docker volume rm nodedr-pos_data` (stack must be stopped first).
+`docker volume rm ssmart-pos_data` (stack must be stopped first).
 
 If you only want to clear the *catalog and sales history* but keep your
 admin login and shop settings, don't delete the files — instead delete
@@ -691,8 +691,8 @@ current admin-account-preserving "factory reset" endpoint.
 ## Project structure
 
 ```
-nodedr-pos/
-├── docker-compose.yml         # declares the nodedr-pos_data named volume
+ssmart-pos/
+├── docker-compose.yml         # declares the ssmart-pos_data named volume
 ├── docs/screenshots/          # README images
 ├── backend/
 │   ├── Dockerfile
