@@ -7,6 +7,8 @@ const JWT_SECRET = getJwtSecret();
 const TOKEN_COOKIE = 'nodedr_session';
 const TOKEN_TTL = '12h';
 
+const COOKIE_SECURE = process.env.COOKIE_SECURE === 'true';
+
 function issueToken(user) {
   return jwt.sign({ sub: user.id, email: user.email, role: user.role }, JWT_SECRET, {
     algorithm: 'HS256',
@@ -17,8 +19,8 @@ function issueToken(user) {
 function setSessionCookie(res, token) {
   res.cookie(TOKEN_COOKIE, token, {
     httpOnly: true,
-    sameSite: 'lax',
-    secure: process.env.COOKIE_SECURE === 'true',
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+    secure: process.env.NODE_ENV === 'production',
     maxAge: 12 * 60 * 60 * 1000,
     path: '/',
   });

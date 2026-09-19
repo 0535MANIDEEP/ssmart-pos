@@ -7,6 +7,14 @@ const cron = require('node-cron');
 const fs = require('fs');
 const path = require('path');
 
+const COOKIE_SECURE = process.env.COOKIE_SECURE === 'true';
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:1994';
+
+// Warn if HTTPS origin but cookie not secure
+if (FRONTEND_ORIGIN.startsWith('https://') && !COOKIE_SECURE) {
+  console.warn('[WARN] FRONTEND_ORIGIN uses HTTPS but COOKIE_SECURE is not true. Session cookies will not be sent over HTTPS. Set COOKIE_SECURE=true in production.');
+}
+
 const authRoutes = require('./routes/auth');
 const settingsRoutes = require('./routes/settings');
 const productRoutes = require('./routes/products');
@@ -36,6 +44,21 @@ app.use(helmet({ contentSecurityPolicy: false })); // CSP is served by the Next.
 app.use(cors({ origin: FRONTEND_ORIGIN, credentials: true }));
 app.use(cookieParser());
 app.use(express.json({ limit: '1mb' }));
+
+// Session cookie settings
+app.use((req, res, next) => {
+  const isSecure = COOKIE_SECURE || process.env.NODE_ENV === 'production';
+  res.cookie = (name, value, options = {}) => {
+    res.cookie(name, value, {
+      ...options,
+      httpOnly: true,
+      secure: isSecure,
+      sameSite: isSecure ? 'none' : 'lax',
+    });
+    return res;
+  };
+  next();
+});
 
 // Defense-in-depth: cap overall request volume per IP.
 app.use(

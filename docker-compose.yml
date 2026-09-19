@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ssmart-pos-backend
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=file:./data/pos.db
+      - JWT_SECRET_FILE=/run/secrets/jwt_secret
+      - FRONTEND_ORIGIN=http://localhost:1994
+      - COOKIE_SECURE=false
+    volumes:
+      - ssmart-pos_data:/app/data
+      - /run/secrets:/run/secrets
+    ports:
+      - "4000:4000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    secrets:
+      - jwt_secret
+    restart: unless-stopped
+    networks:
+      - ssmart-pos-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ssmart-pos-frontend
+    environment:
+      - NEXT_PUBLIC_API_URL=http://backend:4000
+      - NEXT_PUBLIC_SITE_URL=http://localhost:1994
+    ports:
+      - "1994:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - ssmart-pos-network
+
+networks:
+  ssmart-pos-network:
+    driver: bridge
+
+secrets:
+  jwt_secret:
+    file: ./backend/secrets/jwt_secret.txt
+
+volumes:
+  ssmart-pos_data:
+    driver: local
